@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anti-Tailgating</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header>
+  <h1>Anti-Tailgating</h1>
+  <span class="badge">v1.0.0</span>
+  <span id="poll-indicator" title="Polling active"></span>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+  <button class="tab-btn" data-tab="settings">Settings</button>
+</nav>
+
+<div class="content">
+
+  <!-- ========== DASHBOARD ========== -->
+  <div id="tab-dashboard" class="tab-panel active">
+
+    <!-- Token gauge -->
+    <div class="card">
+      <div class="card-title">Access Tokens</div>
+      <div class="gauge-row">
+        <div id="token-count" class="gauge-number">0</div>
+        <div>
+          <div class="gauge-label">Active tokens queued</div>
+          <div class="gauge-sublabel">Tokens expire after <span id="ttl-label">7</span>s of inactivity</div>
+        </div>
+      </div>
+      <div class="status-row">
+        <div id="status-dot" class="dot idle"></div>
+        <span id="status-text">Idle — no recent events</span>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="card">
+      <div class="card-title">Session Statistics</div>
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div id="stat-badge-reads" class="stat-value">0</div>
+          <div class="stat-label">Badge Reads</div>
+        </div>
+        <div class="stat-card">
+          <div id="stat-authorized" class="stat-value">0</div>
+          <div class="stat-label">Authorized Entries</div>
+        </div>
+        <div class="stat-card">
+          <div id="stat-alarms" class="stat-value">0</div>
+          <div class="stat-label">Tailgating Alarms</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="btn-row">
+      <button class="primary" onclick="badgeRead()">Simulate Badge Read</button>
+      <button onclick="thresholdCrossing()">Simulate Line Crossing</button>
+      <button class="danger" onclick="clearHistory()">Clear History</button>
+    </div>
+
+    <!-- Event history -->
+    <div class="card">
+      <div class="card-title">Event History</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Type</th>
+              <th>Source</th>
+              <th>Badge ID</th>
+              <th>Outcome</th>
+            </tr>
+          </thead>
+          <tbody id="event-table-body">
+            <tr><td colspan="5" class="empty-row">No events yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Alarm history -->
+    <div class="card">
+      <div class="card-title">Alarm History</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Notification</th>
+            </tr>
+          </thead>
+          <tbody id="alarm-table-body">
+            <tr><td colspan="2" class="empty-row">No alarms</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /dashboard -->
+
+  <!-- ========== SETTINGS ========== -->
+  <div id="tab-settings" class="tab-panel">
+
+    <div class="card">
+      <div class="card-title">Badge Read Endpoint</div>
+      <div class="form-field">
+        <label>HTTP POST to this URL to register a badge read</label>
+        <div class="url-row">
+          <input type="text" id="badge-read-url" readonly />
+          <button id="copy-url-btn" onclick="copyBadgeUrl()" title="Copy to clipboard">Copy</button>
+        </div>
+        <span class="hint">Body (optional): <code>{"door":"Door Name","card":"CardID"}</code> — both fields appear in the event history</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Token Settings</div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label for="cfg-ttl">Token Expiration (seconds)</label>
+          <input type="number" id="cfg-ttl" min="1" max="3600" value="7" />
+          <span class="hint">How long an access token remains valid after a badge read</span>
+        </div>
+        <div class="form-field">
+          <label for="cfg-aoa-id">AOA Scenario ID</label>
+          <select id="cfg-aoa-id">
+            <option value="">Loading scenarios…</option>
+          </select>
+          <span class="hint" id="cfg-aoa-hint">Detecting human crossline scenarios from AXIS Object Analytics…</span>
+        </div>
+        <div class="form-field">
+          <label for="cfg-io-port">I/O Input Trigger Port</label>
+          <select id="cfg-io-port">
+            <option value="none">None (disabled)</option>
+          </select>
+          <span class="hint" id="cfg-io-hint">Select a digital input port to use as an access-granted trigger (e.g. wired to a door controller relay)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Alarm Action</div>
+      <div class="form-grid">
+
+        <div class="form-field" style="grid-column: 1 / -1">
+          <label for="cfg-alarm-type">Action Type</label>
+          <select id="cfg-alarm-type" onchange="onActionTypeChange()">
+            <option value="none">None (event only)</option>
+            <option value="virtual_input">Virtual Input (remote Axis device)</option>
+            <option value="a9210_output">A9210 Output (remote I/O relay)</option>
+            <option value="custom_http">Custom HTTP/S Webhook</option>
+          </select>
+          <span class="hint">Action to perform when tailgating is detected (in addition to the Axis event). For local outputs, use the camera's Action Rules with the TailgatingAlarm event.</span>
+        </div>
+
+        <!-- Remote device fields (virtual_input, a9210_output) -->
+        <div id="alarm-remote-fields" class="form-field" style="display:none; grid-column: 1 / -1">
+          <div class="form-grid">
+            <div class="form-field">
+              <label for="cfg-alarm-host">Remote Device IP</label>
+              <input type="text" id="cfg-alarm-host" placeholder="192.168.1.100" />
+            </div>
+            <div class="form-field">
+              <label for="cfg-alarm-user">Username</label>
+              <input type="text" id="cfg-alarm-user" placeholder="root" />
+            </div>
+            <div class="form-field">
+              <label for="cfg-alarm-pass">Password</label>
+              <input type="password" id="cfg-alarm-pass" placeholder="password" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Port + Duration (virtual_input, a9210_output, local_output) -->
+        <div id="alarm-port-fields" class="form-field" style="display:none; grid-column: 1 / -1">
+          <div class="form-grid">
+            <div class="form-field">
+              <label for="cfg-alarm-port" id="alarm-port-label">Port</label>
+              <input type="number" id="cfg-alarm-port" min="1" max="64" value="1" />
+            </div>
+            <div class="form-field">
+              <label for="cfg-alarm-duration" id="alarm-duration-label">Duration (seconds)</label>
+              <input type="number" id="cfg-alarm-duration" min="1" max="60000" value="5" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom HTTP fields -->
+        <div id="alarm-http-fields" class="form-field" style="display:none; grid-column: 1 / -1">
+          <div class="form-grid">
+            <div class="form-field" style="grid-column: 1 / -1">
+              <label for="cfg-alarm-url">URL</label>
+              <input type="text" id="cfg-alarm-url" placeholder="https://example.com/webhook" />
+            </div>
+            <div class="form-field">
+              <label for="cfg-alarm-method">Method</label>
+              <select id="cfg-alarm-method">
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+              </select>
+            </div>
+            <div class="form-field">
+              <label for="cfg-alarm-header">Custom Header</label>
+              <input type="text" id="cfg-alarm-header" placeholder="Authorization: Bearer token123" />
+            </div>
+            <div class="form-field" style="grid-column: 1 / -1">
+              <label for="cfg-alarm-payload">Payload (POST/PUT body)</label>
+              <input type="text" id="cfg-alarm-payload" placeholder='{"event":"tailgating"}' />
+            </div>
+            <div class="form-field">
+              <label for="cfg-alarm-http-user">Username (optional)</label>
+              <input type="text" id="cfg-alarm-http-user" placeholder="username" />
+            </div>
+            <div class="form-field">
+              <label for="cfg-alarm-http-pass">Password (optional)</label>
+              <input type="password" id="cfg-alarm-http-pass" placeholder="password" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Test button -->
+        <div id="alarm-test-row" class="form-field" style="display:none; grid-column: 1 / -1">
+          <button class="primary" onclick="testAlarmAction()">Test Alarm Action</button>
+          <span class="hint">Sends one test action immediately (bypasses cooldown)</span>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="primary" onclick="saveConfig()">Save Settings</button>
+      <button class="danger" onclick="resetDefaults()">Reset to Defaults</button>
+    </div>
+
+  </div><!-- /settings -->
+
+</div><!-- /content -->
+
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

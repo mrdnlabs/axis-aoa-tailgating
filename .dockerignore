@@ -1,0 +1,5 @@
+app/*.eap
+app/*.o
+.env.devices
+.git
+docs

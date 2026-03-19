@@ -1,0 +1,94 @@
+{
+  "schemaVersion": "1.9.0",
+  "acapPackageConf": {
+    "setup": {
+      "appName": "antitailgate",
+      "friendlyName": "Anti-Tailgating",
+      "vendor": "MRDN Labs",
+      "embeddedSdkVersion": "3.0",
+      "runMode": "respawn",
+      "version": "1.0.0",
+      "user": {
+        "username": "sdk",
+        "group": "sdk"
+      }
+    },
+    "configuration": {
+      "settingPage": "index.html",
+      "reverseProxy": [
+        {
+          "apiPath": "api",
+          "target": "http://localhost:8080",
+          "access": "admin"
+        }
+      ],
+      "paramConfig": [
+        {
+          "name": "TokenExpirationSeconds",
+          "default": "7",
+          "type": "Int"
+        },
+        {
+          "name": "AoaScenarioId",
+          "default": "1",
+          "type": "String"
+        },
+        {
+          "name": "InputTriggerPort",
+          "default": "none",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionType",
+          "default": "none",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionHost",
+          "default": "",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionPort",
+          "default": "1",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionDuration",
+          "default": "5",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionUser",
+          "default": "",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionPass",
+          "default": "",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionUrl",
+          "default": "",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionMethod",
+          "default": "GET",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionPayload",
+          "default": "",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionHeader",
+          "default": "",
+          "type": "String"
+        }
+      ]
+    }
+  }
+}

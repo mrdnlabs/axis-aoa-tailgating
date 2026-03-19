@@ -1,0 +1,10 @@
+# Device credentials
+.env.devices
+
+# Build artifacts
+*.eap
+
+# CivetWeb vendored sources (downloaded by build.sh)
+app/civetweb.c
+app/civetweb.h
+app/*.inl
