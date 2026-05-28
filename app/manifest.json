@@ -17,9 +17,14 @@
       "settingPage": "index.html",
       "reverseProxy": [
         {
-          "apiPath": "api",
-          "target": "http://localhost:8080",
+          "apiPath": "admin",
+          "target": "http://127.0.0.1:8080/admin",
           "access": "admin"
+        },
+        {
+          "apiPath": "ingest",
+          "target": "http://127.0.0.1:8080/ingest",
+          "access": "operator"
         }
       ],
       "paramConfig": [
@@ -37,6 +42,11 @@
           "name": "InputTriggerPort",
           "default": "none",
           "type": "String"
+        },
+        {
+          "name": "AlarmClearSeconds",
+          "default": "2",
+          "type": "Int"
         },
         {
           "name": "AlarmActionType",

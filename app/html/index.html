@@ -144,6 +144,11 @@
           </select>
           <span class="hint" id="cfg-io-hint">Select a digital input port to use as an access-granted trigger (e.g. wired to a door controller relay)</span>
         </div>
+        <div class="form-field">
+          <label for="cfg-alarm-clear-seconds">Alarm Clear Delay (seconds)</label>
+          <input type="number" id="cfg-alarm-clear-seconds" min="1" max="60" value="2" />
+          <span class="hint">How long the Axis TailgatingAlarm event remains active before auto-clear</span>
+        </div>
       </div>
     </div>
 
@@ -176,6 +181,7 @@
             <div class="form-field">
               <label for="cfg-alarm-pass">Password</label>
               <input type="password" id="cfg-alarm-pass" placeholder="password" />
+              <span class="hint" id="cfg-alarm-pass-status">Leave blank to keep the saved password.</span>
             </div>
           </div>
         </div>
@@ -224,6 +230,7 @@
             <div class="form-field">
               <label for="cfg-alarm-http-pass">Password (optional)</label>
               <input type="password" id="cfg-alarm-http-pass" placeholder="password" />
+              <span class="hint" id="cfg-alarm-http-pass-status">Leave blank to keep the saved password.</span>
             </div>
           </div>
         </div>
@@ -231,6 +238,7 @@
         <!-- Test button -->
         <div id="alarm-test-row" class="form-field" style="display:none; grid-column: 1 / -1">
           <button class="primary" onclick="testAlarmAction()">Test Alarm Action</button>
+          <button type="button" onclick="clearSavedAlarmPassword()">Clear Saved Password</button>
           <span class="hint">Sends one test action immediately (bypasses cooldown)</span>
         </div>
 

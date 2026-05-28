@@ -1,6 +1,7 @@
 #include "alarm_handler.h"
 #include "event_publisher.h"
 #include "config.h"
+#include "token_manager.h"
 
 #include <curl/curl.h>
 #include <pthread.h>
@@ -15,6 +16,7 @@
 #define COOLDOWN_SECONDS 2
 
 static time_t last_action_time = 0;
+static pthread_mutex_t g_alarm_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* No-op write callback — discard response body */
 static size_t discard_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
@@ -34,6 +36,7 @@ typedef struct {
     char payload[1024];
     char header[256];
     bool is_test;
+    uint64_t alarm_id;
 } AlarmActionArgs;
 
 /* Perform a single curl GET/POST and return HTTP status (0 on error) */
@@ -101,6 +104,10 @@ static void *alarm_action_thread(void *arg)
 
     long code = do_curl_request(a, a->url);
     syslog(LOG_INFO, "antitailgate: alarm action completed: HTTP %ld", code);
+    if (a->alarm_id != 0)
+        alarm_record_update(a->alarm_id,
+                            (code >= 200 && code < 300) ?
+                            "request_succeeded" : "request_failed");
 
     /* For output types: sleep then deactivate */
     if (a->deactivate_url[0] && code >= 200 && code < 300) {
@@ -140,33 +147,50 @@ void alarm_handler_notify(bool is_test)
     char *method   = config_get_string("AlarmActionMethod",   "GET");
     char *payload  = config_get_string("AlarmActionPayload",  "");
     char *header   = config_get_string("AlarmActionHeader",   "");
+    uint64_t alarm_id = 0;
+
+    if (!is_test)
+        alarm_id = alarm_record_create("pending");
 
     if (!type || strcmp(type, "none") == 0) {
         syslog(LOG_DEBUG, "antitailgate: alarm action type is 'none', skipping");
+        if (alarm_id != 0)
+            alarm_record_update(alarm_id, "not_configured");
         goto cleanup;
     }
 
     /* Cooldown check (bypass for test) */
     if (!is_test) {
+        pthread_mutex_lock(&g_alarm_mutex);
         time_t now = time(NULL);
         if (now - last_action_time < COOLDOWN_SECONDS) {
+            pthread_mutex_unlock(&g_alarm_mutex);
             syslog(LOG_INFO, "antitailgate: alarm action skipped (cooldown)");
+            if (alarm_id != 0)
+                alarm_record_update(alarm_id, "skipped_cooldown");
             goto cleanup;
         }
         last_action_time = now;
+        pthread_mutex_unlock(&g_alarm_mutex);
     }
 
     AlarmActionArgs *args = calloc(1, sizeof(AlarmActionArgs));
-    if (!args)
+    if (!args) {
+        if (alarm_id != 0)
+            alarm_record_update(alarm_id, "dispatch_failed");
         goto cleanup;
+    }
 
     args->is_test = is_test;
+    args->alarm_id = alarm_id;
     strncpy(args->method, "GET", sizeof(args->method) - 1);
 
     /* Build URL per action type */
     if (strcmp(type, "virtual_input") == 0) {
         if (!host[0]) {
             syslog(LOG_ERR, "antitailgate: virtual_input requires AlarmActionHost");
+            if (alarm_id != 0)
+                alarm_record_update(alarm_id, "dispatch_failed");
             free(args);
             goto cleanup;
         }
@@ -180,6 +204,8 @@ void alarm_handler_notify(bool is_test)
     } else if (strcmp(type, "a9210_output") == 0) {
         if (!host[0]) {
             syslog(LOG_ERR, "antitailgate: a9210_output requires AlarmActionHost");
+            if (alarm_id != 0)
+                alarm_record_update(alarm_id, "dispatch_failed");
             free(args);
             goto cleanup;
         }
@@ -197,6 +223,8 @@ void alarm_handler_notify(bool is_test)
     } else if (strcmp(type, "custom_http") == 0) {
         if (!url[0]) {
             syslog(LOG_ERR, "antitailgate: custom_http requires AlarmActionUrl");
+            if (alarm_id != 0)
+                alarm_record_update(alarm_id, "dispatch_failed");
             free(args);
             goto cleanup;
         }
@@ -209,6 +237,8 @@ void alarm_handler_notify(bool is_test)
 
     } else {
         syslog(LOG_WARNING, "antitailgate: unknown alarm action type '%s'", type);
+        if (alarm_id != 0)
+            alarm_record_update(alarm_id, "dispatch_failed");
         free(args);
         goto cleanup;
     }
@@ -220,6 +250,8 @@ void alarm_handler_notify(bool is_test)
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&tid, &attr, alarm_action_thread, args) != 0) {
         syslog(LOG_ERR, "antitailgate: failed to create alarm action thread");
+        if (alarm_id != 0)
+            alarm_record_update(alarm_id, "dispatch_failed");
         free(args);
     }
     pthread_attr_destroy(&attr);

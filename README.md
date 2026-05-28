@@ -5,7 +5,7 @@ A self-contained ACAP (Axis Camera Application Platform) running directly on an 
 ## What It Does
 
 - Subscribes natively to AXIS Object Analytics (AOA) line crossing events via the AXEvent API
-- Accepts HTTP POST badge-read events from external systems (badge readers, door controllers, ACS)
+- Accepts HTTP POST badge-read events from external systems (badge readers, door controllers, ACS) via an Axis-authenticated operator route
 - Maintains a FIFO queue of access tokens with configurable TTL (default 7 seconds)
 - Detects tailgating: line crossing with no valid token fires an alarm
 - Publishes a native Axis stateful event (`tnsaxis:CameraApplicationPlatform/antitailgate/TailgatingAlarm`) that appears in the camera's event system and can drive action rules (recordings, relay outputs, PTZ, notifications)
@@ -57,17 +57,17 @@ http://192.168.1.238/local/antitailgate/
 
 See [docs/api-reference.md](docs/api-reference.md) for full API documentation.
 
-Key endpoints (accessible via port 8080 directly or via Apache proxy at `/local/antitailgate/api/`):
+Key endpoints:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/badge-read` | POST | Create access token; optional JSON body `{"door":"...","card":"..."}` |
-| `/threshold-crossing` | POST | Simulate line crossing (test/fallback) |
-| `/status` | GET | Token count, event history, alarm history |
-| `/config` | GET/POST | Read/write TokenExpirationSeconds and AoaScenarioId |
-| `/test` | GET | Health check |
-| `/clear-history` | POST | Clear in-memory history |
-| `/reset-defaults` | POST | Reset config to defaults |
+| `/local/antitailgate/ingest/badge-read` | POST | Operator-authenticated badge-read ingestion endpoint |
+| `/local/antitailgate/admin/status` | GET | Admin-only status, event history, and alarm history |
+| `/local/antitailgate/admin/config` | GET/POST | Admin-only config read/write |
+| `/local/antitailgate/admin/threshold-crossing` | POST | Admin-only test/fallback crossing trigger |
+| `/local/antitailgate/admin/test` | GET | Admin-only health check |
+| `/local/antitailgate/admin/clear-history` | POST | Admin-only history reset |
+| `/local/antitailgate/admin/reset-defaults` | POST | Admin-only config reset |
 
 ## Configuration Parameters
 
@@ -75,6 +75,7 @@ Key endpoints (accessible via port 8080 directly or via Apache proxy at `/local/
 |-----------|---------|-------------|
 | `TokenExpirationSeconds` | `7` | Token TTL in seconds |
 | `AoaScenarioId` | `1` | AOA line crossing scenario ID |
+| `AlarmClearSeconds` | `2` | Seconds before the stateful TailgatingAlarm event auto-clears |
 
 All parameters persist across restarts and firmware upgrades via AXParameter API.
 

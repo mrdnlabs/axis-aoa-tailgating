@@ -13,6 +13,7 @@ static GMutex  g_mutex;
 static Token   g_tokens[MAX_TOKENS];
 static int     g_token_count = 0;
 static uint64_t g_next_token_id = 1;
+static uint64_t g_next_alarm_id = 1;
 static int     g_expiration_seconds = 7;
 
 static HistoryEvent g_events[MAX_HISTORY];
@@ -43,7 +44,7 @@ static void push_event_locked(EventType type, EventOutcome outcome,
     ev->badge_id[sizeof(ev->badge_id) - 1] = '\0';
 }
 
-static void push_alarm_locked(bool notification_sent)
+static uint64_t push_alarm_locked(const char *action_status)
 {
     if (g_alarm_count >= MAX_HISTORY) {
         memmove(&g_alarms[0], &g_alarms[1],
@@ -51,8 +52,25 @@ static void push_alarm_locked(bool notification_sent)
         g_alarm_count = MAX_HISTORY - 1;
     }
     AlarmRecord *al = &g_alarms[g_alarm_count++];
-    al->timestamp         = time(NULL);
-    al->notification_sent = notification_sent;
+    al->id        = g_next_alarm_id++;
+    al->timestamp = time(NULL);
+    strncpy(al->action_status, action_status ? action_status : "unknown",
+            sizeof(al->action_status) - 1);
+    al->action_status[sizeof(al->action_status) - 1] = '\0';
+    return al->id;
+}
+
+static void update_alarm_locked(uint64_t alarm_id, const char *action_status)
+{
+    for (int i = g_alarm_count - 1; i >= 0; i--) {
+        if (g_alarms[i].id == alarm_id) {
+            strncpy(g_alarms[i].action_status,
+                    action_status ? action_status : "unknown",
+                    sizeof(g_alarms[i].action_status) - 1);
+            g_alarms[i].action_status[sizeof(g_alarms[i].action_status) - 1] = '\0';
+            return;
+        }
+    }
 }
 
 /* Remove expired tokens in-place. Caller holds mutex. */
@@ -62,6 +80,8 @@ static void expire_locked(void)
     int i = 0;
     while (i < g_token_count) {
         if (g_tokens[i].expiry <= now) {
+            push_event_locked(EVENT_BADGE_READ, OUTCOME_EXPIRED,
+                              g_tokens[i].source, g_tokens[i].badge_id);
             /* Remove by shifting */
             memmove(&g_tokens[i], &g_tokens[i + 1],
                     sizeof(Token) * (g_token_count - i - 1));
@@ -85,6 +105,7 @@ void token_manager_init(int expiration_seconds)
     g_event_count  = 0;
     g_alarm_count  = 0;
     g_next_token_id = 1;
+    g_next_alarm_id = 1;
     syslog(LOG_INFO, "antitailgate: token_manager initialized (TTL=%ds)",
            expiration_seconds);
 }
@@ -108,6 +129,8 @@ int token_add(const char *badge_id, const char *source)
     strncpy(t->badge_id, badge_id ? badge_id : "unknown",
             sizeof(t->badge_id) - 1);
     t->badge_id[sizeof(t->badge_id) - 1] = '\0';
+    strncpy(t->source, src, sizeof(t->source) - 1);
+    t->source[sizeof(t->source) - 1] = '\0';
 
     push_event_locked(EVENT_BADGE_READ, OUTCOME_TOKEN_CREATED,
                       src, badge_id);
@@ -129,7 +152,6 @@ bool token_consume(const char *source)
     if (g_token_count == 0) {
         /* ALARM: no valid token */
         push_event_locked(EVENT_LINE_CROSSING, OUTCOME_ALARM, source, NULL);
-        push_alarm_locked(false); /* notification_sent updated later */
         g_mutex_unlock(&g_mutex);
 
         syslog(LOG_WARNING, "antitailgate: TAILGATING ALARM (source=%s)",
@@ -189,6 +211,21 @@ int history_snapshot(HistoryEvent *out_events, int max_events,
 
     g_mutex_unlock(&g_mutex);
     return ev_count;
+}
+
+uint64_t alarm_record_create(const char *action_status)
+{
+    g_mutex_lock(&g_mutex);
+    uint64_t alarm_id = push_alarm_locked(action_status);
+    g_mutex_unlock(&g_mutex);
+    return alarm_id;
+}
+
+void alarm_record_update(uint64_t alarm_id, const char *action_status)
+{
+    g_mutex_lock(&g_mutex);
+    update_alarm_locked(alarm_id, action_status);
+    g_mutex_unlock(&g_mutex);
 }
 
 void history_clear(void)

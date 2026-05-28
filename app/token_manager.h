@@ -11,6 +11,7 @@ typedef struct {
     uint64_t  id;
     time_t    expiry;
     char      badge_id[64];
+    char      source[64];
 } Token;
 
 typedef enum {
@@ -34,8 +35,9 @@ typedef struct {
 } HistoryEvent;
 
 typedef struct {
-    time_t  timestamp;
-    bool    notification_sent;
+    uint64_t id;
+    time_t   timestamp;
+    char     action_status[32];
 } AlarmRecord;
 
 /**
@@ -65,6 +67,12 @@ void token_expire_tick(void);
 int history_snapshot(HistoryEvent *out_events, int max_events,
                      AlarmRecord *out_alarms, int max_alarms,
                      int *out_alarm_count);
+
+/** Create an alarm history record and return its identifier. */
+uint64_t alarm_record_create(const char *action_status);
+
+/** Update an existing alarm history record. */
+void alarm_record_update(uint64_t alarm_id, const char *action_status);
 
 /** Clear all history. */
 void history_clear(void);

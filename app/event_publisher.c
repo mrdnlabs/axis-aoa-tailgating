@@ -1,4 +1,5 @@
 #include "event_publisher.h"
+#include "config.h"
 
 #include <axsdk/axevent.h>
 #include <glib.h>
@@ -8,6 +9,7 @@
 static AXEventHandler *g_pub_handler   = NULL;
 static guint           g_declaration_id = 0;
 static bool            g_initialized    = false;
+static guint           g_clear_source_id = 0;
 
 /* ------------------------------------------------------------------ */
 /* Init: declare the stateful alarm event                             */
@@ -86,6 +88,41 @@ bool event_publisher_init(void)
 /* Idle callback payload */
 typedef struct { bool active; } SendPayload;
 
+static void send_event_now(bool active)
+{
+    AXEventKeyValueSet *kv = ax_event_key_value_set_new();
+    ax_event_key_value_set_add_key_value(kv,
+        "active", NULL, active ? "1" : "0",
+        AX_VALUE_TYPE_BOOL, NULL);
+
+    AXEvent *event = ax_event_new2(kv, NULL);
+    ax_event_key_value_set_free(kv);
+
+    if (!ax_event_handler_send_event(g_pub_handler, g_declaration_id, event, NULL)) {
+        syslog(LOG_WARNING,
+               "antitailgate: event_publisher: send_event failed (active=%d)", active);
+    } else {
+        syslog(LOG_INFO,
+               "antitailgate: TailgatingAlarm event sent (active=%d)", active);
+    }
+
+    ax_event_free(event);
+}
+
+static gboolean clear_alarm_timeout(gpointer user_data)
+{
+    (void)user_data;
+
+    if (!g_initialized) {
+        g_clear_source_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    send_event_now(false);
+    g_clear_source_id = 0;
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean do_send_event(gpointer data)
 {
     SendPayload *p = (SendPayload *)data;
@@ -95,23 +132,23 @@ static gboolean do_send_event(gpointer data)
         return G_SOURCE_REMOVE;
     }
 
-    AXEventKeyValueSet *kv = ax_event_key_value_set_new();
-    ax_event_key_value_set_add_key_value(kv,
-        "active", NULL, p->active ? "1" : "0",
-        AX_VALUE_TYPE_BOOL, NULL);
+    send_event_now(p->active);
 
-    AXEvent *event = ax_event_new2(kv, NULL);
-    ax_event_key_value_set_free(kv);
-
-    if (!ax_event_handler_send_event(g_pub_handler, g_declaration_id, event, NULL)) {
-        syslog(LOG_WARNING,
-               "antitailgate: event_publisher: send_event failed (active=%d)", p->active);
-    } else {
-        syslog(LOG_INFO,
-               "antitailgate: TailgatingAlarm event sent (active=%d)", p->active);
+    if (g_clear_source_id != 0) {
+        g_source_remove(g_clear_source_id);
+        g_clear_source_id = 0;
     }
 
-    ax_event_free(event);
+    if (p->active) {
+        int clear_seconds = config_get_int("AlarmClearSeconds", 2);
+        if (clear_seconds < 1)
+            clear_seconds = 1;
+        if (clear_seconds > 60)
+            clear_seconds = 60;
+        g_clear_source_id = g_timeout_add_seconds(clear_seconds,
+                                                  clear_alarm_timeout, NULL);
+    }
+
     g_free(p);
     return G_SOURCE_REMOVE;
 }
@@ -133,6 +170,10 @@ void event_publisher_send_alarm(bool active)
 
 void event_publisher_cleanup(void)
 {
+    if (g_clear_source_id != 0) {
+        g_source_remove(g_clear_source_id);
+        g_clear_source_id = 0;
+    }
     if (g_pub_handler) {
         if (g_declaration_id)
             ax_event_handler_undeclare(g_pub_handler, g_declaration_id, NULL);

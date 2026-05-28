@@ -4,10 +4,11 @@
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-/* Prefer Apache reverse proxy; fall back to direct CivetWeb port */
-let API_BASE      = `/local/antitailgate/api`;
+const API_BASE     = `/local/antitailgate/admin`;
+const INGEST_BASE  = `/local/antitailgate/ingest`;
 const POLL_MS     = 2000;
-let apiReady      = false;
+let alarmPassConfigured = false;
+let clearAlarmPassword = false;
 
 /* ------------------------------------------------------------------ */
 /* Tab navigation                                                      */
@@ -43,10 +44,28 @@ function showToast(msg, type = 'info') {
 
 async function apiFetch(path, opts = {}) {
   const resp = await fetch(API_BASE + path, {
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     ...opts
   });
-  return resp.json();
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data.message || `HTTP ${resp.status}`);
+  }
+  return data;
+}
+
+async function ingestFetch(path, opts = {}) {
+  const resp = await fetch(INGEST_BASE + path, {
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    ...opts
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data.message || `HTTP ${resp.status}`);
+  }
+  return data;
 }
 
 /* ------------------------------------------------------------------ */
@@ -126,7 +145,7 @@ function renderStatus(data) {
     atbody.innerHTML = [...alarms].reverse().map(al => `
       <tr>
         <td>${fmtTime(al.timestamp)}</td>
-        <td>${al.notification_sent ? '✓ Sent' : '— Not sent'}</td>
+        <td>${fmtAlarmStatus(al.action_status)}</td>
       </tr>`).join('');
   }
 }
@@ -163,13 +182,24 @@ function fmtOutcome(o) {
   }[o] || o;
 }
 
+function fmtAlarmStatus(status) {
+  return {
+    pending: 'Pending',
+    not_configured: 'No action configured',
+    skipped_cooldown: 'Skipped by cooldown',
+    dispatch_failed: 'Dispatch failed',
+    request_failed: 'Request failed',
+    request_succeeded: 'Request succeeded',
+  }[status] || (status || '—');
+}
+
 /* ------------------------------------------------------------------ */
 /* Dashboard action buttons                                            */
 /* ------------------------------------------------------------------ */
 
 async function badgeRead() {
   try {
-    const d = await apiFetch('/badge-read', { method: 'POST' });
+    const d = await ingestFetch('/badge-read', { method: 'POST' });
     showToast(`Token created. Active: ${d.token_count}`, 'success');
     pollStatus();
   } catch { showToast('Badge read failed', 'error'); }
@@ -233,9 +263,9 @@ async function loadAoaScenarios(currentId) {
 
     if (scenarios.length === 1) {
       sel.value        = scenarios[0].id;
-      hint.textContent = 'Auto-selected: only one human crossline scenario found. Change requires app restart.';
+      hint.textContent = 'Auto-selected: only one human crossline scenario found.';
     } else {
-      hint.textContent = `${scenarios.length} human crossline scenarios found. Change requires app restart.`;
+      hint.textContent = `${scenarios.length} human crossline scenarios found.`;
     }
   } catch (e) {
     sel.innerHTML    = `<option value="${currentId}">${currentId} (AOA unavailable)</option>`;
@@ -338,7 +368,7 @@ function onActionTypeChange() {
     portFields.style.display   = '';
     portLabel.textContent      = 'Output Port';
     durLabel.textContent       = 'Duration (milliseconds)';
-    portNum.max = 8;
+    portNum.max = 12;
   } else if (type === 'custom_http') {
     httpFields.style.display   = '';
   }
@@ -366,6 +396,7 @@ async function loadConfig() {
     await loadAoaScenarios(String(d.AoaScenarioId ?? '1'));
     await loadIoPorts(String(d.InputTriggerPort ?? 'none'));
     document.getElementById('ttl-label').textContent = d.TokenExpirationSeconds ?? 7;
+    document.getElementById('cfg-alarm-clear-seconds').value = d.AlarmClearSeconds ?? 2;
 
     /* Alarm action fields */
     document.getElementById('cfg-alarm-type').value     = d.AlarmActionType     ?? 'none';
@@ -373,15 +404,35 @@ async function loadConfig() {
     document.getElementById('cfg-alarm-port').value     = d.AlarmActionPort     ?? '1';
     document.getElementById('cfg-alarm-duration').value = d.AlarmActionDuration ?? '5';
     document.getElementById('cfg-alarm-user').value     = d.AlarmActionUser     ?? '';
-    document.getElementById('cfg-alarm-pass').value     = d.AlarmActionPass     ?? '';
+    document.getElementById('cfg-alarm-pass').value     = '';
     document.getElementById('cfg-alarm-url').value      = d.AlarmActionUrl      ?? '';
     document.getElementById('cfg-alarm-method').value   = d.AlarmActionMethod   ?? 'GET';
     document.getElementById('cfg-alarm-payload').value  = d.AlarmActionPayload  ?? '';
     document.getElementById('cfg-alarm-header').value   = d.AlarmActionHeader   ?? '';
     document.getElementById('cfg-alarm-http-user').value = d.AlarmActionUser    ?? '';
-    document.getElementById('cfg-alarm-http-pass').value = d.AlarmActionPass    ?? '';
+    document.getElementById('cfg-alarm-http-pass').value = '';
+    alarmPassConfigured = Boolean(d.AlarmActionPassConfigured);
+    clearAlarmPassword = false;
+    updatePasswordStatus();
     onActionTypeChange();
   } catch { showToast('Failed to load config', 'error'); }
+}
+
+function updatePasswordStatus() {
+  const text = alarmPassConfigured
+    ? 'A password is saved. Leave blank to keep it, or clear it explicitly.'
+    : 'No password is currently saved.';
+  document.getElementById('cfg-alarm-pass-status').textContent = text;
+  document.getElementById('cfg-alarm-http-pass-status').textContent = text;
+}
+
+function clearSavedAlarmPassword() {
+  clearAlarmPassword = true;
+  alarmPassConfigured = false;
+  document.getElementById('cfg-alarm-pass').value = '';
+  document.getElementById('cfg-alarm-http-pass').value = '';
+  updatePasswordStatus();
+  showToast('Saved password will be cleared on save', 'info');
 }
 
 /* ------------------------------------------------------------------ */
@@ -407,6 +458,7 @@ async function saveConfig() {
     TokenExpirationSeconds: parseInt(document.getElementById('cfg-ttl').value, 10),
     AoaScenarioId:          String(document.getElementById('cfg-aoa-id').value),
     InputTriggerPort:       String(document.getElementById('cfg-io-port').value),
+    AlarmClearSeconds:      parseInt(document.getElementById('cfg-alarm-clear-seconds').value, 10),
     AlarmActionType:        type,
     AlarmActionHost:        document.getElementById('cfg-alarm-host').value,
     AlarmActionPort:        String(port),
@@ -418,10 +470,20 @@ async function saveConfig() {
     AlarmActionPayload:     document.getElementById('cfg-alarm-payload').value,
     AlarmActionHeader:      document.getElementById('cfg-alarm-header').value,
   };
+  if (pass) {
+    body.AlarmActionPass = pass;
+  } else if (clearAlarmPassword) {
+    body.AlarmActionClearPass = true;
+  }
   try {
     await apiFetch('/config', { method: 'POST', body: JSON.stringify(body) });
     showToast('Settings saved', 'success');
     document.getElementById('ttl-label').textContent = body.TokenExpirationSeconds;
+    alarmPassConfigured = pass ? true : (clearAlarmPassword ? false : alarmPassConfigured);
+    clearAlarmPassword = false;
+    document.getElementById('cfg-alarm-pass').value = '';
+    document.getElementById('cfg-alarm-http-pass').value = '';
+    updatePasswordStatus();
   } catch { showToast('Save failed', 'error'); }
 }
 
@@ -443,7 +505,7 @@ async function resetDefaults() {
 /* ------------------------------------------------------------------ */
 
 function populateBadgeUrl() {
-  const url = `http://${window.location.hostname}:8080/badge-read`;
+  const url = `${window.location.origin}${INGEST_BASE}/badge-read`;
   document.getElementById('badge-read-url').value = url;
 }
 
@@ -476,13 +538,6 @@ function copyBadgeUrl() {
 /* ------------------------------------------------------------------ */
 
 (async function init() {
-  try {
-    const r = await fetch(`${API_BASE}/test`, { credentials: 'same-origin' });
-    if (!r.ok) throw new Error(r.status);
-  } catch {
-    API_BASE = `http://${window.location.hostname}:8080`;
-  }
-  apiReady = true;
   pollStatus();
   setInterval(pollStatus, POLL_MS);
 })();

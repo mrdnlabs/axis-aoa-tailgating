@@ -3,7 +3,7 @@
 #include <stdbool.h>
 
 /**
- * Initialize and start the embedded CivetWeb HTTP server on localhost:port.
+ * Initialize and start the embedded CivetWeb HTTP server on 127.0.0.1:port.
  * Returns true on success.
  */
 bool web_server_init(int port);
