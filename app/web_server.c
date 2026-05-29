@@ -421,6 +421,45 @@ static bool validate_int_range(int value, int min_val, int max_val,
     return true;
 }
 
+/* Allow empty (= "unset"), or a non-empty numeric string within [min,max]. */
+static bool validate_numeric_str(const char *value, int min_val, int max_val,
+                                 const char *field, char *err, size_t err_len)
+{
+    if (!value || !value[0])
+        return true;
+    for (size_t i = 0; value[i]; i++) {
+        if (!isdigit((unsigned char)value[i])) {
+            snprintf(err, err_len, "Field '%s' must be numeric", field);
+            return false;
+        }
+    }
+    long v = strtol(value, NULL, 10);
+    if (v < min_val || v > max_val) {
+        snprintf(err, err_len, "Field '%s' must be between %d and %d",
+                 field, min_val, max_val);
+        return false;
+    }
+    return true;
+}
+
+/* Allow empty, or a hostname/IP: [A-Za-z0-9.-_] only. No URLs, no schemes. */
+static bool validate_host(const char *value, const char *field,
+                          char *err, size_t err_len)
+{
+    if (!value || !value[0])
+        return true;
+    for (size_t i = 0; value[i]; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (!(isalnum(c) || c == '.' || c == '-' || c == '_')) {
+            snprintf(err, err_len,
+                     "Field '%s' must be a hostname or IP "
+                     "(letters, digits, '.', '-', '_')", field);
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool config_set_checked(const char *name, const char *value,
                                GString *updated, GString *errors)
 {
@@ -774,8 +813,27 @@ static int handler_config_post(struct mg_connection *conn, void *cbdata)
                 status_code = 400;
                 goto finish;
             }
-            if (present)
+            if (present) {
+                /* Field-specific shape checks beyond length. */
+                if (strcmp(fields[i].name, "AlarmActionHost") == 0 &&
+                    !validate_host(value, "AlarmActionHost", err, sizeof(err))) {
+                    status_code = 400;
+                    goto finish;
+                }
+                if (strcmp(fields[i].name, "AlarmActionPort") == 0 &&
+                    !validate_numeric_str(value, 1, 65535,
+                                          "AlarmActionPort", err, sizeof(err))) {
+                    status_code = 400;
+                    goto finish;
+                }
+                if (strcmp(fields[i].name, "AlarmActionDuration") == 0 &&
+                    !validate_numeric_str(value, 1, 3600,
+                                          "AlarmActionDuration", err, sizeof(err))) {
+                    status_code = 400;
+                    goto finish;
+                }
                 config_set_checked(fields[i].name, value, updated, errors);
+            }
         }
     }
 

@@ -130,11 +130,15 @@ char *config_get_string(const char *name, const char *default_val)
 int config_get_int(const char *name, int default_val)
 {
     char *s = config_get_string(name, NULL);
-    if (!s)
+    if (!s || !s[0]) {
+        free(s);
         return default_val;
-    int v = atoi(s);
+    }
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    bool ok = (end != s && *end == '\0');
     free(s);
-    return v ? v : default_val;
+    return ok ? (int)v : default_val;
 }
 
 bool config_set(const char *name, const char *value)

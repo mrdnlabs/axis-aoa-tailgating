@@ -8,8 +8,8 @@ COPY ./app /opt/app/
 WORKDIR /opt/app
 
 # Fix permissions from Windows/WSL filesystem (777 → standard Unix)
+# Required: device silently skips reverse-proxy rule creation on 777 perms.
 RUN find . -type f -exec chmod 644 {} + && \
-    find . -type d -exec chmod 755 {} + && \
-    chmod 755 *.c 2>/dev/null; true
+    find . -type d -exec chmod 755 {} +
 
 RUN . /opt/axis/acapsdk/environment-setup* && acap-build ./

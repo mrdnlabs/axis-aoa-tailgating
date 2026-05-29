@@ -3,6 +3,11 @@
 
 # Build artifacts
 *.eap
+*.o
+build/
+
+# Build logs
+*.log
 
 # CivetWeb vendored sources (downloaded by build.sh)
 app/civetweb.c

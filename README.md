@@ -33,24 +33,30 @@ This cannot be set via VAPIX — it must be done through the browser UI.
 
 ### 3. Install
 
-Use Python (curl has issues with HTTP Digest auth combined with multipart upload):
+Set device-specific values in `.env.devices` (gitignored — see `.env.devices.example` if provided) or substitute inline. Then upload via VAPIX. `curl` (with HTTPS) works on most setups:
+
+```bash
+curl -k --digest -u "$CAMERA_USER:$CAMERA_PASS" \
+  -F "packfil=@app/Anti-Tailgating_1_0_0_aarch64.eap" \
+  "https://$CAMERA_IP/axis-cgi/applications/upload.cgi"
+```
+
+Or with Python `requests` (HTTP works for older firmware):
 
 ```python
 import requests
 from requests.auth import HTTPDigestAuth
 with open('app/Anti-Tailgating_1_0_0_aarch64.eap', 'rb') as f:
-    r = requests.post('http://192.168.1.238/axis-cgi/applications/upload.cgi',
-                      auth=HTTPDigestAuth('admin', 'admin'),
-                      files={'packfil': ('Anti-Tailgating_1_0_0_aarch64.eap', f, 'application/octet-stream')})
+    r = requests.post(f'https://{CAMERA_IP}/axis-cgi/applications/upload.cgi',
+                      auth=HTTPDigestAuth(CAMERA_USER, CAMERA_PASS),
+                      files={'packfil': f}, verify=False)
 print(r.status_code, r.text)
 ```
-
-> **Note**: Device credentials are stored in `.env.devices` (not committed to git). Update the username/password above to match your device.
 
 ### 4. Open Web UI
 
 ```
-http://192.168.1.238/local/antitailgate/
+https://<CAMERA_IP>/local/antitailgate/
 ```
 
 ## API
@@ -71,13 +77,38 @@ Key endpoints:
 
 ## Configuration Parameters
 
+Stored via the AXParameter API; persist across restarts and firmware upgrades.
+
+### Detection
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `TokenExpirationSeconds` | `7` | Token TTL in seconds |
 | `AoaScenarioId` | `1` | AOA line crossing scenario ID |
+| `InputTriggerPort` | `none` | Digital input port to treat as badge-read (or `none`) |
 | `AlarmClearSeconds` | `2` | Seconds before the stateful TailgatingAlarm event auto-clears |
 
-All parameters persist across restarts and firmware upgrades via AXParameter API.
+### Alarm Action (outbound HTTP/VAPIX on alarm)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `AlarmActionType` | `none` | `none`, `virtual_input`, `a9210_output`, or `custom_http` |
+| `AlarmActionHost` | `""` | Target host for `virtual_input` / `a9210_output` (Axis device IP) |
+| `AlarmActionPort` | `"1"` | Virtual input / output port number |
+| `AlarmActionDuration` | `"5"` | Pulse duration in seconds (`virtual_input` / `a9210_output`) |
+| `AlarmActionUser` | `""` | Username for digest auth on the action endpoint |
+| `AlarmActionPass` | `""` | **Credential. See Security below.** |
+| `AlarmActionUrl` | `""` | Target URL for `custom_http` action |
+| `AlarmActionMethod` | `GET` | HTTP method for `custom_http` (GET/POST/PUT) |
+| `AlarmActionPayload` | `""` | Request body for `custom_http` |
+| `AlarmActionHeader` | `""` | Extra request header for `custom_http` (`Name: value`) |
+
+## Security
+
+- The web UI and API are reached through Axis's reverse proxy, which enforces digest authentication and TLS. The internal CivetWeb listener binds to `127.0.0.1:8080` only.
+- Two proxy roles are exposed: `/local/antitailgate/admin/*` (admin) and `/local/antitailgate/ingest/*` (operator).
+- `/admin/config` (GET) **does not** echo `AlarmActionPass`. It returns `AlarmActionPassConfigured` (boolean) instead. Set the password via POST or clear it with `{"AlarmActionClearPass": true}`.
+- **Known risk:** `AlarmActionPass` is stored via AXParameter, which any user with admin VAPIX access can read in plaintext via `param.cgi?action=list&group=root.Antitailgate`. This matches the threat model of "any admin can already do anything," but if the operator and the alarm-action endpoint use different credentials, treat the action password as on par with admin.
 
 ## Project Structure
 

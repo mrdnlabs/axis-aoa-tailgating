@@ -1,5 +1,6 @@
-app/*.eap
-app/*.o
+*.eap
+*.o
+*.log
 .env.devices
 .git
 docs
