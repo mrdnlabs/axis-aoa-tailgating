@@ -18,12 +18,12 @@
       "reverseProxy": [
         {
           "apiPath": "admin",
-          "target": "http://127.0.0.1:8080/admin",
+          "target": "http://127.0.0.1:8080",
           "access": "admin"
         },
         {
           "apiPath": "ingest",
-          "target": "http://127.0.0.1:8080/ingest",
+          "target": "http://127.0.0.1:8080",
           "access": "operator"
         }
       ],
