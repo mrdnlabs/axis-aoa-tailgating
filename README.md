@@ -105,10 +105,25 @@ Stored via the AXParameter API; persist across restarts and firmware upgrades.
 
 ## Security
 
+### Transport and access control
+
 - The web UI and API are reached through Axis's reverse proxy, which enforces digest authentication and TLS. The internal CivetWeb listener binds to `127.0.0.1:8080` only.
 - Two proxy roles are exposed: `/local/antitailgate/admin/*` (admin) and `/local/antitailgate/ingest/*` (operator).
-- `/admin/config` (GET) **does not** echo `AlarmActionPass`. It returns `AlarmActionPassConfigured` (boolean) instead. Set the password via POST or clear it with `{"AlarmActionClearPass": true}`.
-- **Known risk:** `AlarmActionPass` is stored via AXParameter, which any user with admin VAPIX access can read in plaintext via `param.cgi?action=list&group=root.Antitailgate`. This matches the threat model of "any admin can already do anything," but if the operator and the alarm-action endpoint use different credentials, treat the action password as on par with admin.
+- Input validation: `AlarmActionHost` must be a hostname or IP (no schemes, no spaces); `AlarmActionPort` and `AlarmActionDuration` must be numeric and in range. JSON bodies are validated against a flat-object schema with per-field length limits.
+
+### Alarm-action credential handling
+
+- `AlarmActionPass` is declared with the AXParameter `password:maxlen=127` type. The runtime masks the value in:
+  - `param.cgi?action=list` (returns `******` instead of the value)
+  - The AXIS OS 12.7+ audit log
+  - The settings UI (rendered as a password field)
+- The ACAP itself reads the value via `ax_parameter_get` and uses it as the HTTP digest credential for the configured `AlarmActionHost`.
+- `/admin/config` (GET) **does not** echo `AlarmActionPass`. It returns `AlarmActionPassConfigured` (boolean). Set the password by POSTing `{"AlarmActionPass": "..."}` and clear it with `{"AlarmActionClearPass": true}`.
+
+### Residual risk
+
+- AXParameter stores `password`-typed values unencrypted on the device's flash. A root-level compromise of the device — or physical extraction of the flash — still exposes the value. There is no Axis-provided keystore for ACAPs ([standards §4.3](https://github.com/) acknowledges this).
+- Upgrading an existing device from a build that stored `AlarmActionPass` as a plain `String` will mask the value in `param.cgi` going forward, but the on-flash residue from the old build remains until the next write. **Rotate any password that was previously exposed via `param.cgi`** after upgrading.
 
 ## Project Structure
 

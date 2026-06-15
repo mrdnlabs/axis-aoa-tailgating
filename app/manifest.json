@@ -76,7 +76,7 @@
         {
           "name": "AlarmActionPass",
           "default": "",
-          "type": "String"
+          "type": "password:maxlen=127"
         },
         {
           "name": "AlarmActionUrl",

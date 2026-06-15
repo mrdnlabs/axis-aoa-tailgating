@@ -36,7 +36,11 @@ IMAGE_TAG="antitailgate-acap:${ARCH}"
 EAP_NAME="Anti-Tailgating_1_0_0_${ARCH}.eap"
 
 echo "Building for ${ARCH}..."
+# --no-cache: BuildKit on WSL2 can serve a stale COPY layer when source files
+# change, silently shipping an old manifest.json. The whole rebuild is a few
+# seconds; not worth the diagnostic cost of cache poisoning.
 docker build \
+  --no-cache \
   --build-arg ARCH="${ARCH}" \
   --build-arg VERSION="${VERSION}" \
   --build-arg UBUNTU_VERSION="${UBUNTU_VERSION}" \
