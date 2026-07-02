@@ -10,7 +10,9 @@
 #include <glib-unix.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <syslog.h>
+#include <unistd.h>
 
 #define APP_NAME      "antitailgate"
 #define WEB_PORT      8080
@@ -39,6 +41,20 @@ static gboolean on_signal(gpointer user_data)
     if (g_loop)
         g_main_loop_quit(g_loop);
     return G_SOURCE_REMOVE;
+}
+
+/* SIGALRM handler: last-chance escape if the cleanup chain wedges (usually
+ * on ax_event_handler_free or ax_parameter_free blocking on D-Bus).  Only
+ * uses async-signal-safe operations: _exit and write. */
+static void on_cleanup_alarm(int sig)
+{
+    (void)sig;
+    static const char msg[] =
+        "antitailgate: cleanup exceeded watchdog, forcing exit\n";
+    /* Best-effort write to stderr; ignore return. */
+    ssize_t r = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)r;
+    _exit(0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -120,15 +136,37 @@ int main(void)
     /* 8. Block until signal */
     g_main_loop_run(g_loop);
 
-    /* 9. Cleanup */
+    /* 9. Cleanup — order matters.
+     *
+     *  - web_server_cleanup FIRST: closes all incoming requests before we
+     *    start freeing modules whose state those requests might touch
+     *    (AXEvent handlers via resubscribe, AXParameter via config POST).
+     *  - alarm_handler_drain BEFORE the modules the workers depend on
+     *    (config / token_manager) are torn down; a still-running worker
+     *    would otherwise UAF on config_get_string or alarm_record_update.
+     *  - AXEvent free calls (via input_trigger, event_subscriber,
+     *    event_publisher) can block on D-Bus for 10+ seconds; the SIGALRM
+     *    watchdog below caps the total teardown at 5 s so systemd does not
+     *    SIGKILL us mid-cleanup.
+     */
     syslog(LOG_INFO, "antitailgate: cleaning up");
+
+    /* SIGALRM watchdog: if the cleanup chain wedges (typically inside
+     * ax_event_handler_free on a stuck D-Bus), exit cleanly rather than
+     * getting SIGKILL'd. */
+    signal(SIGALRM, on_cleanup_alarm);
+    alarm(5);
+
+    web_server_cleanup();
+    alarm_handler_drain(3000);
     input_trigger_cleanup();
     event_subscriber_cleanup();
     event_publisher_cleanup();
-    web_server_cleanup();
     alarm_handler_cleanup();
     token_manager_cleanup();
     config_cleanup();
+
+    alarm(0);
 
     g_main_loop_unref(g_loop);
     closelog();

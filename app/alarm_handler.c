@@ -15,8 +15,36 @@
 /* Cooldown: minimum seconds between alarm actions */
 #define COOLDOWN_SECONDS 2
 
+/* Cleanup drain: how long to wait for in-flight workers before curl teardown. */
+#define WORKERS_DRAIN_TIMEOUT_MS 5000
+
 static time_t last_action_time = 0;
 static pthread_mutex_t g_alarm_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* In-flight worker tracking so we can drain before curl_global_cleanup and
+ * before config_cleanup / token_manager_cleanup release things the worker
+ * touches (a curl_easy_perform() in a still-running detached thread would
+ * otherwise be a use-after-free of the curl global state or of the
+ * AXParameter handle). */
+static int             g_workers_inflight = 0;
+static pthread_mutex_t g_workers_mtx      = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_workers_cv       = PTHREAD_COND_INITIALIZER;
+
+static void workers_add(void)
+{
+    pthread_mutex_lock(&g_workers_mtx);
+    g_workers_inflight++;
+    pthread_mutex_unlock(&g_workers_mtx);
+}
+
+static void workers_remove(void)
+{
+    pthread_mutex_lock(&g_workers_mtx);
+    if (g_workers_inflight > 0)
+        g_workers_inflight--;
+    pthread_cond_broadcast(&g_workers_cv);
+    pthread_mutex_unlock(&g_workers_mtx);
+}
 
 /* No-op write callback — discard response body */
 static size_t discard_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
@@ -199,6 +227,7 @@ static void *alarm_action_thread(void *arg)
     }
 
     free_args_zeroed(a);
+    workers_remove();
     return NULL;
 }
 
@@ -207,8 +236,43 @@ void alarm_handler_init(void)
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
+/* Bounded wait for all in-flight alarm workers to finish before we tear
+ * down libcurl.  Public so main() can drain before earlier-in-the-chain
+ * cleanups (config, token_manager) run, since worker threads touch those
+ * modules through config_get_string / alarm_record_update. */
+void alarm_handler_drain(int timeout_ms)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec  += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&g_workers_mtx);
+    while (g_workers_inflight > 0) {
+        int rc = pthread_cond_timedwait(&g_workers_cv, &g_workers_mtx,
+                                        &deadline);
+        if (rc != 0) {
+            syslog(LOG_WARNING,
+                   "antitailgate: %d alarm worker(s) still in flight after "
+                   "%d ms; leaving them (cleanup may race)",
+                   g_workers_inflight, timeout_ms);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_workers_mtx);
+}
+
 void alarm_handler_cleanup(void)
 {
+    /* Drain any workers that beat us here.  Callers ordinarily call
+     * alarm_handler_drain() first before tearing down the modules those
+     * workers depend on (config, token_manager); this is a last-chance
+     * safety net. */
+    alarm_handler_drain(WORKERS_DRAIN_TIMEOUT_MS);
     curl_global_cleanup();
 }
 
@@ -354,7 +418,11 @@ void alarm_handler_notify(bool is_test)
         goto cleanup;
     }
 
-    /* Spawn detached thread */
+    /* Spawn detached thread.  Reserve an in-flight slot BEFORE the thread
+     * starts (so alarm_handler_drain sees it even if we race with cleanup);
+     * release the slot on failure. */
+    workers_add();
+
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -364,6 +432,7 @@ void alarm_handler_notify(bool is_test)
         if (alarm_id != 0)
             alarm_record_update(alarm_id, "dispatch_failed");
         free_args_zeroed(args);
+        workers_remove();
     }
     pthread_attr_destroy(&attr);
 

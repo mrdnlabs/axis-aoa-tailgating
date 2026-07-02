@@ -14,6 +14,15 @@ void alarm_handler_init(void);
 void alarm_handler_notify(bool is_test);
 
 /**
- * Clean up the alarm handler (curl_global_cleanup).
+ * Wait (up to timeout_ms) for all in-flight alarm workers to finish.
+ * Call this in the shutdown sequence BEFORE tearing down the modules the
+ * workers depend on (config, token_manager, curl globals).
+ */
+void alarm_handler_drain(int timeout_ms);
+
+/**
+ * Clean up the alarm handler.  Drains workers with a 5-second default,
+ * then curl_global_cleanup.  Callers that need a longer bound should
+ * call alarm_handler_drain() explicitly first.
  */
 void alarm_handler_cleanup(void);

@@ -14,6 +14,12 @@
 static AXParameter *g_ax_param = NULL;
 static bool g_use_fallback = false;
 
+/* AXParameter is accessed from the GLib main loop, CivetWeb worker threads,
+ * and the detached alarm-action worker threads.  The library's own thread
+ * safety is not documented; serialize all get/set here. */
+static GMutex g_config_mutex;
+static bool   g_config_mutex_initialized = false;
+
 /* ---------- Fallback helpers (minimal key=value file) ---------- */
 
 static char *fallback_get(const char *name, const char *default_val)
@@ -89,6 +95,10 @@ static bool fallback_set(const char *name, const char *value)
 
 bool config_init(const char *app_name)
 {
+    if (!g_config_mutex_initialized) {
+        g_mutex_init(&g_config_mutex);
+        g_config_mutex_initialized = true;
+    }
     GError *err = NULL;
     g_ax_param = ax_parameter_new(app_name, &err);
     if (!g_ax_param) {
@@ -113,13 +123,16 @@ char *config_get_string(const char *name, const char *default_val)
     if (g_use_fallback)
         return fallback_get(name, default_val);
 
+    g_mutex_lock(&g_config_mutex);
     GError *err = NULL;
     gchar *value = NULL;
     if (!ax_parameter_get(g_ax_param, name, &value, &err)) {
+        g_mutex_unlock(&g_config_mutex);
         if (err)
             g_error_free(err);
         return g_strdup(default_val);
     }
+    g_mutex_unlock(&g_config_mutex);
     if (!value || value[0] == '\0') {
         g_free(value);
         return g_strdup(default_val);
@@ -146,8 +159,11 @@ bool config_set(const char *name, const char *value)
     if (g_use_fallback)
         return fallback_set(name, value);
 
+    g_mutex_lock(&g_config_mutex);
     GError *err = NULL;
-    if (!ax_parameter_set(g_ax_param, name, value, TRUE, &err)) {
+    bool ok = ax_parameter_set(g_ax_param, name, value, TRUE, &err);
+    g_mutex_unlock(&g_config_mutex);
+    if (!ok) {
         syslog(LOG_ERR, "antitailgate: config_set(%s) failed: %s",
                name, err ? err->message : "unknown");
         if (err)
@@ -160,7 +176,13 @@ bool config_set(const char *name, const char *value)
 void config_cleanup(void)
 {
     if (g_ax_param) {
+        g_mutex_lock(&g_config_mutex);
         ax_parameter_free(g_ax_param);
         g_ax_param = NULL;
+        g_mutex_unlock(&g_config_mutex);
+    }
+    if (g_config_mutex_initialized) {
+        g_mutex_clear(&g_config_mutex);
+        g_config_mutex_initialized = false;
     }
 }
