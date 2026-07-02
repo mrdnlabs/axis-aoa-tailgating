@@ -5,6 +5,18 @@
 #include <syslog.h>
 #include <time.h>
 
+/* Monotonic seconds since an arbitrary epoch — used for TTL math so an
+ * NTP step of the wall clock does not mass-expire the token queue.
+ * Wall-clock time_t is still used for HistoryEvent.timestamp because those
+ * are shown to users in /admin/status. */
+static int64_t mono_now_sec(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (int64_t)ts.tv_sec;
+}
+
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
@@ -76,10 +88,10 @@ static void update_alarm_locked(uint64_t alarm_id, const char *action_status)
 /* Remove expired tokens in-place. Caller holds mutex. */
 static void expire_locked(void)
 {
-    time_t now = time(NULL);
+    int64_t now_mono = mono_now_sec();
     int i = 0;
     while (i < g_token_count) {
-        if (g_tokens[i].expiry <= now) {
+        if (g_tokens[i].expiry_mono <= now_mono) {
             push_event_locked(EVENT_BADGE_READ, OUTCOME_EXPIRED,
                               g_tokens[i].source, g_tokens[i].badge_id);
             /* Remove by shifting */
@@ -124,8 +136,8 @@ int token_add(const char *badge_id, const char *source)
     }
 
     Token *t = &g_tokens[g_token_count++];
-    t->id     = g_next_token_id++;
-    t->expiry = time(NULL) + g_expiration_seconds;
+    t->id          = g_next_token_id++;
+    t->expiry_mono = mono_now_sec() + g_expiration_seconds;
     strncpy(t->badge_id, badge_id ? badge_id : "unknown",
             sizeof(t->badge_id) - 1);
     t->badge_id[sizeof(t->badge_id) - 1] = '\0';

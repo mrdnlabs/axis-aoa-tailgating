@@ -9,7 +9,7 @@
 
 typedef struct {
     uint64_t  id;
-    time_t    expiry;
+    int64_t   expiry_mono;  /* CLOCK_MONOTONIC seconds; NTP-jump safe */
     char      badge_id[64];
     char      source[64];
 } Token;

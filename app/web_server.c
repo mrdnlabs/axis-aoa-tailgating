@@ -8,6 +8,8 @@
 
 #include <glib.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,6 +122,13 @@ static void fmt_time(time_t t, char *out, size_t out_len)
     strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &tm_val);
 }
 
+/* Escape a UTF-8-ish string for embedding in a JSON string per RFC 8259 §7:
+ *   - " and \  become \" and \\
+ *   - control bytes (< 0x20) become the named escapes (\b \f \n \r \t)
+ *     or \u00XX
+ *   - all other bytes pass through
+ * Truncates cleanly if the output buffer would overflow.  Never emits
+ * partial escape sequences. */
 static void json_escape(const char *in, char *out, size_t out_len)
 {
     size_t j = 0;
@@ -129,10 +138,31 @@ static void json_escape(const char *in, char *out, size_t out_len)
         return;
     }
 
-    for (size_t i = 0; in[i] && j + 2 < out_len; i++) {
-        if (in[i] == '"' || in[i] == '\\')
-            out[j++] = '\\';
-        out[j++] = in[i];
+    for (size_t i = 0; in[i]; i++) {
+        unsigned char c = (unsigned char)in[i];
+        const char *seq   = NULL;
+        char        u[7]  = {0};
+        size_t      seqlen = 0;
+        char        pair[3] = {0};
+
+        if (c == '"')       { seq = "\\\""; seqlen = 2; }
+        else if (c == '\\') { seq = "\\\\"; seqlen = 2; }
+        else if (c == '\b') { seq = "\\b";  seqlen = 2; }
+        else if (c == '\f') { seq = "\\f";  seqlen = 2; }
+        else if (c == '\n') { seq = "\\n";  seqlen = 2; }
+        else if (c == '\r') { seq = "\\r";  seqlen = 2; }
+        else if (c == '\t') { seq = "\\t";  seqlen = 2; }
+        else if (c < 0x20 || c == 0x7f) {
+            snprintf(u, sizeof(u), "\\u%04x", c);
+            seq = u; seqlen = 6;
+        } else {
+            pair[0] = (char)c; pair[1] = '\0'; seq = pair; seqlen = 1;
+        }
+
+        if (j + seqlen + 1 > out_len)
+            break; /* leave room for terminator */
+        memcpy(out + j, seq, seqlen);
+        j += seqlen;
     }
     out[j] = '\0';
 }
@@ -372,9 +402,15 @@ static bool json_get_int(const char *json, const char *key,
         return false;
     }
 
+    errno = 0;
     parsed = strtol(value, &end, 10);
     if (!end || end == value) {
         snprintf(err, err_len, "Field '%s' must be an integer", key);
+        return false;
+    }
+    if (errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX) {
+        snprintf(err, err_len,
+                 "Field '%s' must fit in a 32-bit signed integer", key);
         return false;
     }
     end = (char *)skip_ws(end);
@@ -426,6 +462,46 @@ static bool validate_string(const char *value, size_t max_len,
         snprintf(err, err_len, "Field '%s' exceeds %zu characters",
                  field, max_len);
         return false;
+    }
+    /* Reject control bytes and DEL: they break log lines (log injection),
+     * corrupt the fallback key=value config, produce invalid JSON when
+     * echoed, and CR/LF specifically enables HTTP header injection via
+     * AlarmActionHeader.  Legitimate values (badge IDs, door names,
+     * hostnames, URLs, payloads) never contain them. */
+    for (size_t i = 0; value[i]; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (c < 0x20 || c == 0x7f) {
+            snprintf(err, err_len,
+                     "Field '%s' contains a control character (0x%02x)",
+                     field, c);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Header value: extra shape check on top of validate_string.  Must contain
+ * a ':' separator and start with a non-empty header name. */
+static bool validate_header_value(const char *value, const char *field,
+                                  char *err, size_t err_len)
+{
+    if (!value || !value[0])
+        return true;
+    const char *colon = strchr(value, ':');
+    if (!colon || colon == value) {
+        snprintf(err, err_len,
+                 "Field '%s' must have the form 'Name: value'", field);
+        return false;
+    }
+    /* Header name RFC 7230 tchar */
+    for (const char *p = value; p < colon; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!(isalnum(c) || c == '-' || c == '_' || c == '.')) {
+            snprintf(err, err_len,
+                     "Field '%s' header name contains an invalid character",
+                     field);
+            return false;
+        }
     }
     return true;
 }
@@ -896,6 +972,34 @@ static int handler_config_post(struct mg_connection *conn, void *cbdata)
                     status_code = 400;
                     goto finish;
                 }
+                if (strcmp(fields[i].name, "AlarmActionHeader") == 0 &&
+                    !validate_header_value(value, "AlarmActionHeader",
+                                           err, sizeof(err))) {
+                    status_code = 400;
+                    goto finish;
+                }
+                if (strcmp(fields[i].name, "AlarmActionType") == 0) {
+                    if (strcmp(value, "none") != 0 &&
+                        strcmp(value, "virtual_input") != 0 &&
+                        strcmp(value, "a9210_output") != 0 &&
+                        strcmp(value, "custom_http") != 0) {
+                        snprintf(err, sizeof(err),
+                                 "Field 'AlarmActionType' must be one of "
+                                 "none, virtual_input, a9210_output, custom_http");
+                        status_code = 400;
+                        goto finish;
+                    }
+                }
+                if (strcmp(fields[i].name, "AlarmActionMethod") == 0) {
+                    if (strcmp(value, "GET")  != 0 &&
+                        strcmp(value, "POST") != 0 &&
+                        strcmp(value, "PUT")  != 0) {
+                        snprintf(err, sizeof(err),
+                                 "Field 'AlarmActionMethod' must be GET, POST, or PUT");
+                        status_code = 400;
+                        goto finish;
+                    }
+                }
                 config_set_checked(fields[i].name, value, updated, errors);
             }
         }
@@ -924,31 +1028,6 @@ static int handler_config_post(struct mg_connection *conn, void *cbdata)
             config_set_checked("AlarmActionInsecure",
                                insecure ? "true" : "false",
                                updated, errors);
-    }
-
-    {
-        char *type = config_get_string("AlarmActionType", "none");
-        bool valid = type &&
-                     (strcmp(type, "none") == 0 ||
-                      strcmp(type, "virtual_input") == 0 ||
-                      strcmp(type, "a9210_output") == 0 ||
-                      strcmp(type, "custom_http") == 0);
-        if (!valid)
-            g_string_append(errors, errors->len > 0 ? ",\"AlarmActionType invalid\"" :
-                                                "\"AlarmActionType invalid\"");
-        free(type);
-    }
-
-    {
-        char *method = config_get_string("AlarmActionMethod", "GET");
-        bool valid = method &&
-                     (strcmp(method, "GET") == 0 ||
-                      strcmp(method, "POST") == 0 ||
-                      strcmp(method, "PUT") == 0);
-        if (!valid)
-            g_string_append(errors, errors->len > 0 ? ",\"AlarmActionMethod invalid\"" :
-                                                "\"AlarmActionMethod invalid\"");
-        free(method);
     }
 
     if (errors->len > 0)

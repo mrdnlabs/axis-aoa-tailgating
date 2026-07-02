@@ -18,8 +18,19 @@
 /* Cleanup drain: how long to wait for in-flight workers before curl teardown. */
 #define WORKERS_DRAIN_TIMEOUT_MS 5000
 
-static time_t last_action_time = 0;
+/* Monotonic timestamp so an NTP step of the wall clock cannot freeze the
+ * cooldown (last_action_time - now goes negative and > COOLDOWN_SECONDS on
+ * backward jumps) or short-circuit it on forward jumps. */
+static int64_t         last_action_mono = 0;
 static pthread_mutex_t g_alarm_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t mono_now_sec(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (int64_t)ts.tv_sec;
+}
 
 /* In-flight worker tracking so we can drain before curl_global_cleanup and
  * before config_cleanup / token_manager_cleanup release things the worker
@@ -279,6 +290,13 @@ void alarm_handler_cleanup(void)
 void alarm_handler_notify(bool is_test)
 {
     syslog(LOG_INFO, "antitailgate: alarm fired (test=%d)", is_test);
+
+    /* Publish the stateful TailgatingAlarm as soon as we know a tailgate
+     * happened.  This is the canonical notification: Axis action rules
+     * (record video, illuminate light, PTZ) subscribe here.  The outbound
+     * HTTP alarm action below is a supplementary integration and may be
+     * skipped by config (type=none), cooldown, or dispatch failure -- none
+     * of those should affect whether the event fires. */
     event_publisher_send_alarm(true);
 
     /* Read config */
@@ -307,15 +325,15 @@ void alarm_handler_notify(bool is_test)
     /* Cooldown check (bypass for test) */
     if (!is_test) {
         pthread_mutex_lock(&g_alarm_mutex);
-        time_t now = time(NULL);
-        if (now - last_action_time < COOLDOWN_SECONDS) {
+        int64_t now_mono = mono_now_sec();
+        if (now_mono - last_action_mono < COOLDOWN_SECONDS) {
             pthread_mutex_unlock(&g_alarm_mutex);
             syslog(LOG_INFO, "antitailgate: alarm action skipped (cooldown)");
             if (alarm_id != 0)
                 alarm_record_update(alarm_id, "skipped_cooldown");
             goto cleanup;
         }
-        last_action_time = now;
+        last_action_mono = now_mono;
         pthread_mutex_unlock(&g_alarm_mutex);
     }
 
