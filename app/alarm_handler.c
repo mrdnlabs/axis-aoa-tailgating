@@ -25,6 +25,42 @@ static size_t discard_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     return size * nmemb;
 }
 
+/* Copy scheme://host[:port]/path from in into out; drop userinfo, query,
+ * and fragment.  Used to keep operator-supplied secrets out of syslog. */
+static void sanitize_url_for_log(const char *in, char *out, size_t out_len)
+{
+    if (!in || !out || out_len == 0)
+        return;
+    out[0] = '\0';
+    const char *scheme_end = strstr(in, "://");
+    if (!scheme_end) {
+        snprintf(out, out_len, "%s", in);
+        return;
+    }
+    const char *authority = scheme_end + 3;
+    /* Skip userinfo if present */
+    const char *at = strchr(authority, '@');
+    const char *slash = strchr(authority, '/');
+    if (at && (!slash || at < slash))
+        authority = at + 1;
+
+    /* Copy scheme:// */
+    size_t scheme_len = (size_t)(scheme_end - in);
+    if (scheme_len + 3 >= out_len) {
+        snprintf(out, out_len, "<url>");
+        return;
+    }
+    memcpy(out, in, scheme_len);
+    memcpy(out + scheme_len, "://", 3);
+    size_t j = scheme_len + 3;
+
+    /* Copy authority + path only (stop at ? or #) */
+    for (size_t i = 0; authority[i] && authority[i] != '?' &&
+                       authority[i] != '#' && j + 1 < out_len; i++)
+        out[j++] = authority[i];
+    out[j] = '\0';
+}
+
 /* Thread argument: owns all strings */
 typedef struct {
     char url[1024];
@@ -53,13 +89,43 @@ static long do_curl_request(const AlarmActionArgs *a, const char *url)
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
+    curl_easy_setopt(curl, CURLOPT_UNRESTRICTED_AUTH, 0L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "antitailgate/1.0.0");
 
-    /* Digest auth if credentials provided */
+    /* Multithread safety: libcurl uses SIGALRM for DNS timeouts by default;
+     * with detached worker threads, that signal is delivered to an
+     * unpredictable thread and can kill the process.  NOSIGNAL disables it. */
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    /* TLS: explicitly on.  libcurl defaults to 1L/2L on modern builds, but
+     * the intent should be in the code, not the toolchain. */
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+    /* Scheme allowlist: default-open libcurl accepts file://, gopher://,
+     * dict://, sftp://, etc.  An operator setting AlarmActionUrl to a
+     * non-web scheme should get a dispatch failure, not a filesystem read. */
+#ifdef CURLOPT_PROTOCOLS_STR
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR,       "http,https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS,
+                     (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,
+                     (long)(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
+
+    /* Digest auth if credentials provided.  Prefer digest, but if the target
+     * only advertises Basic (e.g. AXIS OS 12.9 with Basic-only policy), fall
+     * back so alarm-action still works.  Never fall forward from Basic-only
+     * targets to Digest guessing (CURLAUTH_ANY explicitly excludes NTLM). */
     if (a->user[0]) {
         char userpwd[260];
         snprintf(userpwd, sizeof(userpwd), "%s:%s", a->user, a->pass);
         curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd);
-        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_DIGEST);
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH,
+                         (long)(CURLAUTH_DIGEST | CURLAUTH_BASIC));
     }
 
     /* Custom method */
@@ -95,12 +161,27 @@ static long do_curl_request(const AlarmActionArgs *a, const char *url)
     return http_code;
 }
 
+/* Free credentials-holding args, zeroing before free so plaintext does not
+ * linger in the heap (recoverable from core dumps). */
+static void free_args_zeroed(AlarmActionArgs *a)
+{
+    if (!a)
+        return;
+    explicit_bzero(a->user,    sizeof(a->user));
+    explicit_bzero(a->pass,    sizeof(a->pass));
+    explicit_bzero(a->header,  sizeof(a->header));
+    explicit_bzero(a->payload, sizeof(a->payload));
+    free(a);
+}
+
 static void *alarm_action_thread(void *arg)
 {
     AlarmActionArgs *a = (AlarmActionArgs *)arg;
 
+    char safe_url[1024];
+    sanitize_url_for_log(a->url, safe_url, sizeof(safe_url));
     syslog(LOG_INFO, "antitailgate: alarm action: %s %s (test=%d)",
-           a->method, a->url, a->is_test);
+           a->method, safe_url, a->is_test);
 
     long code = do_curl_request(a, a->url);
     syslog(LOG_INFO, "antitailgate: alarm action completed: HTTP %ld", code);
@@ -117,7 +198,7 @@ static void *alarm_action_thread(void *arg)
         syslog(LOG_INFO, "antitailgate: alarm action deactivate: HTTP %ld", code2);
     }
 
-    free(a);
+    free_args_zeroed(a);
     return NULL;
 }
 
@@ -185,19 +266,29 @@ void alarm_handler_notify(bool is_test)
     args->alarm_id = alarm_id;
     strncpy(args->method, "GET", sizeof(args->method) - 1);
 
+    /* Outbound scheme for the built-in Axis-CGI targets.  Default https://:
+     * digest/basic credentials in cleartext over http:// is exactly how
+     * pass3/root3 leaked to param.cgi in the first place.  An admin who
+     * knows their LAN and their target device has no TLS can opt out via
+     * AlarmActionInsecure=true. */
+    char *insecure_str = config_get_string("AlarmActionInsecure", "false");
+    bool insecure = (insecure_str && strcmp(insecure_str, "true") == 0);
+    free(insecure_str);
+    const char *scheme = insecure ? "http" : "https";
+
     /* Build URL per action type */
     if (strcmp(type, "virtual_input") == 0) {
         if (!host[0]) {
             syslog(LOG_ERR, "antitailgate: virtual_input requires AlarmActionHost");
             if (alarm_id != 0)
                 alarm_record_update(alarm_id, "dispatch_failed");
-            free(args);
+            free_args_zeroed(args);
             goto cleanup;
         }
         snprintf(args->url, sizeof(args->url),
-                 "http://%s/axis-cgi/virtualinput/activate.cgi"
+                 "%s://%s/axis-cgi/virtualinput/activate.cgi"
                  "?schemaversion=1&port=%s&duration=%s",
-                 host, port, duration);
+                 scheme, host, port, duration);
         strncpy(args->user, user, sizeof(args->user) - 1);
         strncpy(args->pass, pass, sizeof(args->pass) - 1);
 
@@ -206,16 +297,16 @@ void alarm_handler_notify(bool is_test)
             syslog(LOG_ERR, "antitailgate: a9210_output requires AlarmActionHost");
             if (alarm_id != 0)
                 alarm_record_update(alarm_id, "dispatch_failed");
-            free(args);
+            free_args_zeroed(args);
             goto cleanup;
         }
         /* Activate: action=<port>:/ then deactivate: action=<port>:\ */
         snprintf(args->url, sizeof(args->url),
-                 "http://%s/axis-cgi/io/port.cgi?action=%s%%3A%%2F",
-                 host, port);
+                 "%s://%s/axis-cgi/io/port.cgi?action=%s%%3A%%2F",
+                 scheme, host, port);
         snprintf(args->deactivate_url, sizeof(args->deactivate_url),
-                 "http://%s/axis-cgi/io/port.cgi?action=%s%%3A%%5C",
-                 host, port);
+                 "%s://%s/axis-cgi/io/port.cgi?action=%s%%3A%%5C",
+                 scheme, host, port);
         args->pulse_ms = atoi(duration);
         strncpy(args->user, user, sizeof(args->user) - 1);
         strncpy(args->pass, pass, sizeof(args->pass) - 1);
@@ -225,7 +316,27 @@ void alarm_handler_notify(bool is_test)
             syslog(LOG_ERR, "antitailgate: custom_http requires AlarmActionUrl");
             if (alarm_id != 0)
                 alarm_record_update(alarm_id, "dispatch_failed");
-            free(args);
+            free_args_zeroed(args);
+            goto cleanup;
+        }
+        /* Server-side allowlist even though the config POST validator
+         * rejects invalid schemes: belt-and-suspenders against stale param
+         * values written before validation existed. */
+        if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+            syslog(LOG_ERR,
+                   "antitailgate: custom_http URL must start with http:// or https://");
+            if (alarm_id != 0)
+                alarm_record_update(alarm_id, "dispatch_failed");
+            free_args_zeroed(args);
+            goto cleanup;
+        }
+        if (!insecure && strncmp(url, "http://", 7) == 0) {
+            syslog(LOG_ERR,
+                   "antitailgate: custom_http URL is http:// but "
+                   "AlarmActionInsecure=false; set true to allow cleartext");
+            if (alarm_id != 0)
+                alarm_record_update(alarm_id, "dispatch_failed");
+            free_args_zeroed(args);
             goto cleanup;
         }
         strncpy(args->url, url, sizeof(args->url) - 1);
@@ -239,7 +350,7 @@ void alarm_handler_notify(bool is_test)
         syslog(LOG_WARNING, "antitailgate: unknown alarm action type '%s'", type);
         if (alarm_id != 0)
             alarm_record_update(alarm_id, "dispatch_failed");
-        free(args);
+        free_args_zeroed(args);
         goto cleanup;
     }
 
@@ -252,7 +363,7 @@ void alarm_handler_notify(bool is_test)
         syslog(LOG_ERR, "antitailgate: failed to create alarm action thread");
         if (alarm_id != 0)
             alarm_record_update(alarm_id, "dispatch_failed");
-        free(args);
+        free_args_zeroed(args);
     }
     pthread_attr_destroy(&attr);
 

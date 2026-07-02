@@ -462,6 +462,32 @@ static bool validate_numeric_str(const char *value, int min_val, int max_val,
     return true;
 }
 
+/* Allow empty, or an http:// / https:// URL.  No file://, gopher://, etc. */
+static bool validate_url(const char *value, const char *field,
+                         char *err, size_t err_len)
+{
+    if (!value || !value[0])
+        return true;
+    if (strncmp(value, "http://", 7) != 0 &&
+        strncmp(value, "https://", 8) != 0) {
+        snprintf(err, err_len,
+                 "Field '%s' must start with http:// or https://", field);
+        return false;
+    }
+    /* Reject whitespace / control chars in the URL; a well-formed URL
+     * cannot legally contain them anyway. */
+    for (size_t i = 0; value[i]; i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (c < 0x21 || c == 0x7f) {
+            snprintf(err, err_len,
+                     "Field '%s' contains a whitespace or control character",
+                     field);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Allow empty, or a hostname/IP: [A-Za-z0-9.-_] only. No URLs, no schemes. */
 static bool validate_host(const char *value, const char *field,
                           char *err, size_t err_len)
@@ -659,6 +685,7 @@ static int handler_config_get(struct mg_connection *conn, void *cbdata)
     char *iop = config_get_string("InputTriggerPort", "none");
     char *clear_seconds = config_get_string("AlarmClearSeconds", "2");
     char *aa_type     = config_get_string("AlarmActionType",     "none");
+    char *aa_insecure = config_get_string("AlarmActionInsecure", "false");
     char *aa_host     = config_get_string("AlarmActionHost",     "");
     char *aa_port     = config_get_string("AlarmActionPort",     "1");
     char *aa_duration = config_get_string("AlarmActionDuration", "5");
@@ -693,6 +720,7 @@ static int handler_config_get(struct mg_connection *conn, void *cbdata)
              "\"InputTriggerPort\":\"%s\","
              "\"AlarmClearSeconds\":%s,"
              "\"AlarmActionType\":\"%s\","
+             "\"AlarmActionInsecure\":%s,"
              "\"AlarmActionHost\":\"%s\","
              "\"AlarmActionPort\":\"%s\","
              "\"AlarmActionDuration\":\"%s\","
@@ -702,13 +730,15 @@ static int handler_config_get(struct mg_connection *conn, void *cbdata)
              "\"AlarmActionMethod\":\"%s\","
              "\"AlarmActionPayload\":\"%s\","
              "\"AlarmActionHeader\":\"%s\"}",
-             ttl, safe_aoa, safe_iop, s_clear,
-             s_type, s_host, s_port, s_dur, s_user,
+             ttl, safe_aoa, safe_iop, s_clear, s_type,
+             (aa_insecure && strcmp(aa_insecure, "true") == 0) ? "true" : "false",
+             s_host, s_port, s_dur, s_user,
              (aa_pass && aa_pass[0]) ? "true" : "false",
              s_url, s_method, s_payload, s_header);
 
     free(ttl); free(aoa); free(iop); free(clear_seconds);
-    free(aa_type); free(aa_host); free(aa_port); free(aa_duration);
+    free(aa_type); free(aa_insecure);
+    free(aa_host); free(aa_port); free(aa_duration);
     free(aa_user); free(aa_pass); free(aa_url); free(aa_method);
     free(aa_payload); free(aa_header);
 
@@ -861,6 +891,11 @@ static int handler_config_post(struct mg_connection *conn, void *cbdata)
                     status_code = 400;
                     goto finish;
                 }
+                if (strcmp(fields[i].name, "AlarmActionUrl") == 0 &&
+                    !validate_url(value, "AlarmActionUrl", err, sizeof(err))) {
+                    status_code = 400;
+                    goto finish;
+                }
                 config_set_checked(fields[i].name, value, updated, errors);
             }
         }
@@ -875,6 +910,20 @@ static int handler_config_post(struct mg_connection *conn, void *cbdata)
         }
         if (present && clear_pass)
             config_set_checked("AlarmActionPass", "", updated, errors);
+    }
+
+    {
+        bool insecure = false;
+        bool present = false;
+        if (!json_get_bool(body, "AlarmActionInsecure", &insecure,
+                           &present, err, sizeof(err))) {
+            status_code = 400;
+            goto finish;
+        }
+        if (present)
+            config_set_checked("AlarmActionInsecure",
+                               insecure ? "true" : "false",
+                               updated, errors);
     }
 
     {
@@ -975,6 +1024,7 @@ static int handler_reset_defaults(struct mg_connection *conn, void *cbdata)
     config_set("InputTriggerPort", "none");
     config_set("AlarmClearSeconds", "2");
     config_set("AlarmActionType", "none");
+    config_set("AlarmActionInsecure", "false");
     config_set("AlarmActionHost", "");
     config_set("AlarmActionPort", "1");
     config_set("AlarmActionDuration", "5");

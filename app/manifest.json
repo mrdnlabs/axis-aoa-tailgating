@@ -54,6 +54,11 @@
           "type": "String"
         },
         {
+          "name": "AlarmActionInsecure",
+          "default": "false",
+          "type": "bool:false,true"
+        },
+        {
           "name": "AlarmActionHost",
           "default": "",
           "type": "String"

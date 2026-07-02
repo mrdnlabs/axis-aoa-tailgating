@@ -50,6 +50,11 @@ int main(void)
     openlog(APP_NAME, LOG_PID | LOG_CONS, LOG_USER);
     syslog(LOG_INFO, "antitailgate: starting v1.0.0");
 
+    /* One unsignaled SIGPIPE from libcurl on a half-closed connection would
+     * terminate the whole ACAP.  Ignore it here; libcurl's per-handle
+     * CURLOPT_NOSIGNAL=1L keeps its own alarm() calls out of our way. */
+    signal(SIGPIPE, SIG_IGN);
+
     /* 1. Configuration */
     if (!config_init(APP_NAME)) {
         syslog(LOG_ERR, "antitailgate: config_init failed");
