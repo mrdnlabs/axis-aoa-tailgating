@@ -16,10 +16,10 @@
 #include <time.h>
 
 #define APP_VERSION      "1.0.0"
-#define ADMIN_PREFIX     "/admin"
-#define INGEST_PREFIX    "/ingest"
 #define ADMIN_PROXY_PFX  "/local/antitailgate/admin"
 #define INGEST_PROXY_PFX "/local/antitailgate/ingest"
+#define CSRF_HEADER_NAME  "X-Requested-With"
+#define CSRF_HEADER_VALUE "antitailgate"
 
 static struct mg_context *g_ctx = NULL;
 
@@ -81,6 +81,38 @@ static int begin_request_callback(struct mg_connection *conn)
     return 0;
 }
 
+/* Enforce method + body shape for mutating handlers and reject simple-form
+ * CSRF.  Returns true if the request may proceed; on false, a 4xx response
+ * has already been sent.  Set require_xrw=true for admin endpoints (browser
+ * only); leave false for ingest endpoints that server-side callers hit. */
+static bool require_mutating_request(struct mg_connection *conn, bool require_xrw)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    if (!ri) {
+        send_error(conn, 400, "Bad request");
+        return false;
+    }
+    if (strcmp(ri->request_method, "POST") != 0) {
+        send_error(conn, 405, "Method not allowed; POST required");
+        return false;
+    }
+    const char *ct = mg_get_header(conn, "Content-Type");
+    if (!ct || strncasecmp(ct, "application/json", 16) != 0) {
+        send_error(conn, 415,
+                   "Unsupported Media Type; application/json required");
+        return false;
+    }
+    if (require_xrw) {
+        const char *xrw = mg_get_header(conn, CSRF_HEADER_NAME);
+        if (!xrw || strcmp(xrw, CSRF_HEADER_VALUE) != 0) {
+            send_error(conn, 403,
+                       "Missing or invalid " CSRF_HEADER_NAME " header");
+            return false;
+        }
+    }
+    return true;
+}
+
 static void fmt_time(time_t t, char *out, size_t out_len)
 {
     struct tm tm_val;
@@ -103,18 +135,6 @@ static void json_escape(const char *in, char *out, size_t out_len)
         out[j++] = in[i];
     }
     out[j] = '\0';
-}
-
-static void get_query_param(struct mg_connection *conn,
-                            const char *name,
-                            char *out, size_t out_len)
-{
-    const struct mg_request_info *ri = mg_get_request_info(conn);
-    out[0] = '\0';
-    if (!ri || !ri->query_string)
-        return;
-    mg_get_var(ri->query_string, strlen(ri->query_string),
-               name, out, (int)out_len);
 }
 
 static char *read_body(struct mg_connection *conn)
@@ -478,6 +498,11 @@ static int handler_badge_read(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
 
+    /* Operator endpoint: POST + JSON required, no X-Requested-With (server-
+     * side ACS / VMS callers do not send custom headers). */
+    if (!require_mutating_request(conn, false))
+        return 400;
+
     char badge_id[64] = "";
     char source[64]   = "http";
     char err[256] = "";
@@ -485,8 +510,6 @@ static int handler_badge_read(struct mg_connection *conn, void *cbdata)
     char card[64];
     bool present = false;
     char *body = NULL;
-
-    get_query_param(conn, "badge_id", badge_id, sizeof(badge_id));
 
     body = read_body(conn);
     if (body) {
@@ -549,6 +572,9 @@ static int handler_badge_read(struct mg_connection *conn, void *cbdata)
 static int handler_threshold_crossing(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+
+    if (!require_mutating_request(conn, true))
+        return 400;
 
     bool authorized = token_consume("http");
     if (!authorized)
@@ -693,6 +719,9 @@ static int handler_config_get(struct mg_connection *conn, void *cbdata)
 static int handler_config_post(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+
+    if (!require_mutating_request(conn, true))
+        return 400;
 
     char *body = read_body(conn);
     char err[256] = "";
@@ -925,6 +954,10 @@ static int handler_test(struct mg_connection *conn, void *cbdata)
 static int handler_clear_history(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+
+    if (!require_mutating_request(conn, true))
+        return 400;
+
     history_clear();
     send_json(conn, 200, "{\"status\":\"ok\",\"message\":\"History cleared\"}");
     return 200;
@@ -933,6 +966,9 @@ static int handler_clear_history(struct mg_connection *conn, void *cbdata)
 static int handler_reset_defaults(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+
+    if (!require_mutating_request(conn, true))
+        return 400;
 
     config_set("TokenExpirationSeconds", "7");
     config_set("AoaScenarioId", "1");
@@ -959,6 +995,9 @@ static int handler_reset_defaults(struct mg_connection *conn, void *cbdata)
 static int handler_test_alarm_action(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+
+    if (!require_mutating_request(conn, true))
+        return 400;
 
     char *type = config_get_string("AlarmActionType", "none");
     if (!type || strcmp(type, "none") == 0) {
@@ -998,33 +1037,19 @@ bool web_server_init(int port)
         return false;
     }
 
-    register_handler("/badge-read", handler_badge_read);
-    register_handler(INGEST_PREFIX "/badge-read", handler_badge_read);
-    register_handler(INGEST_PROXY_PFX "/badge-read", handler_badge_read);
+    /* Only the proxy-prefixed paths are registered: the Axis reverse proxy
+     * targets exactly these URIs.  The previous unprefixed and ADMIN_PREFIX
+     * registrations were reachable from any co-installed ACAP that could
+     * connect to 127.0.0.1:8080 and bypassed the manifest role split. */
+    register_handler(INGEST_PROXY_PFX "/badge-read",        handler_badge_read);
 
-    register_handler("/test", handler_test);
-    register_handler("/status", handler_status);
-    register_handler("/config", handler_config);
-    register_handler("/threshold-crossing", handler_threshold_crossing);
-    register_handler("/clear-history", handler_clear_history);
-    register_handler("/reset-defaults", handler_reset_defaults);
-    register_handler("/test-alarm-action", handler_test_alarm_action);
-
-    register_handler(ADMIN_PREFIX "/test", handler_test);
-    register_handler(ADMIN_PREFIX "/status", handler_status);
-    register_handler(ADMIN_PREFIX "/config", handler_config);
-    register_handler(ADMIN_PREFIX "/threshold-crossing", handler_threshold_crossing);
-    register_handler(ADMIN_PREFIX "/clear-history", handler_clear_history);
-    register_handler(ADMIN_PREFIX "/reset-defaults", handler_reset_defaults);
-    register_handler(ADMIN_PREFIX "/test-alarm-action", handler_test_alarm_action);
-
-    register_handler(ADMIN_PROXY_PFX "/test", handler_test);
-    register_handler(ADMIN_PROXY_PFX "/status", handler_status);
-    register_handler(ADMIN_PROXY_PFX "/config", handler_config);
-    register_handler(ADMIN_PROXY_PFX "/threshold-crossing", handler_threshold_crossing);
-    register_handler(ADMIN_PROXY_PFX "/clear-history", handler_clear_history);
-    register_handler(ADMIN_PROXY_PFX "/reset-defaults", handler_reset_defaults);
-    register_handler(ADMIN_PROXY_PFX "/test-alarm-action", handler_test_alarm_action);
+    register_handler(ADMIN_PROXY_PFX  "/test",              handler_test);
+    register_handler(ADMIN_PROXY_PFX  "/status",            handler_status);
+    register_handler(ADMIN_PROXY_PFX  "/config",            handler_config);
+    register_handler(ADMIN_PROXY_PFX  "/threshold-crossing", handler_threshold_crossing);
+    register_handler(ADMIN_PROXY_PFX  "/clear-history",     handler_clear_history);
+    register_handler(ADMIN_PROXY_PFX  "/reset-defaults",    handler_reset_defaults);
+    register_handler(ADMIN_PROXY_PFX  "/test-alarm-action", handler_test_alarm_action);
 
     syslog(LOG_INFO, "antitailgate: CivetWeb started on localhost:8080");
     return true;

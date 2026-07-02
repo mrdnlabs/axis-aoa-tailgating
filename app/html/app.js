@@ -43,10 +43,17 @@ function showToast(msg, type = 'info') {
 /* ------------------------------------------------------------------ */
 
 async function apiFetch(path, opts = {}) {
+  /* X-Requested-With is the CSRF gate on admin mutating endpoints; cross-
+   * origin simple forms cannot set custom request headers. */
+  const headers = {
+    'Content-Type':     'application/json',
+    'X-Requested-With': 'antitailgate',
+    ...(opts.headers || {}),
+  };
   const resp = await fetch(API_BASE + path, {
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    ...opts
+    ...opts,
+    headers,
   });
   const data = await resp.json();
   if (!resp.ok) {
@@ -56,10 +63,14 @@ async function apiFetch(path, opts = {}) {
 }
 
 async function ingestFetch(path, opts = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(opts.headers || {}),
+  };
   const resp = await fetch(INGEST_BASE + path, {
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    ...opts
+    ...opts,
+    headers,
   });
   const data = await resp.json();
   if (!resp.ok) {
