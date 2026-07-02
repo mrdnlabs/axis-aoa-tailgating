@@ -4,6 +4,7 @@
 #include "token_manager.h"
 
 #include <curl/curl.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -229,9 +230,17 @@ static void *alarm_action_thread(void *arg)
                             (code >= 200 && code < 300) ?
                             "request_succeeded" : "request_failed");
 
-    /* For output types: sleep then deactivate */
+    /* For output types: sleep then deactivate.  nanosleep instead of
+     * usleep because usleep is POSIX-limited to <1_000_000 us and
+     * silently returns EINVAL for larger values; pulse_ms can be up to
+     * 3_600_000 ms (3600 s).  Also retries on EINTR. */
     if (a->deactivate_url[0] && code >= 200 && code < 300) {
-        usleep((useconds_t)a->pulse_ms * 1000);
+        struct timespec rem = {
+            .tv_sec  = a->pulse_ms / 1000,
+            .tv_nsec = (long)(a->pulse_ms % 1000) * 1000000L,
+        };
+        while (nanosleep(&rem, &rem) == -1 && errno == EINTR)
+            ; /* resume with remaining time */
         syslog(LOG_INFO, "antitailgate: alarm action: deactivating output");
         long code2 = do_curl_request(a, a->deactivate_url);
         syslog(LOG_INFO, "antitailgate: alarm action deactivate: HTTP %ld", code2);
@@ -445,6 +454,10 @@ void alarm_handler_notify(bool is_test)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    /* Default pthread stack is ~8 MB on glibc; that is a lot on a camera
+     * that may host several ACAPs concurrently.  256 KB is plenty for a
+     * libcurl TLS handshake plus a shallow call tree. */
+    pthread_attr_setstacksize(&attr, 256 * 1024);
     if (pthread_create(&tid, &attr, alarm_action_thread, args) != 0) {
         syslog(LOG_ERR, "antitailgate: failed to create alarm action thread");
         if (alarm_id != 0)

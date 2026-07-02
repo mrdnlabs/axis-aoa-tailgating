@@ -249,6 +249,14 @@ void history_clear(void)
     syslog(LOG_INFO, "antitailgate: history cleared");
 }
 
+void token_clear_all(void)
+{
+    g_mutex_lock(&g_mutex);
+    g_token_count = 0;
+    g_mutex_unlock(&g_mutex);
+    syslog(LOG_INFO, "antitailgate: all tokens cleared");
+}
+
 void token_set_expiration(int seconds)
 {
     g_mutex_lock(&g_mutex);

@@ -44,10 +44,35 @@ static void send_json(struct mg_connection *conn,
               "HTTP/1.1 %d %s\r\n"
               "Content-Type: application/json\r\n"
               "Content-Length: %d\r\n"
+              /* Sensitive JSON (config, status) should never sit in a
+               * browser cache and should not be sniffed as anything but
+               * JSON.  X-Frame-Options: DENY plus the same-origin CSP on
+               * the HTML page keeps this app out of iframes. */
+              "Cache-Control: no-store, no-cache, must-revalidate, private\r\n"
+              "Pragma: no-cache\r\n"
+              "X-Content-Type-Options: nosniff\r\n"
+              "X-Frame-Options: DENY\r\n"
               "Connection: close\r\n"
               "\r\n",
               status_code, http_reason(status_code), (int)strlen(json));
     mg_write(conn, json, strlen(json));
+}
+
+/* Emit an audit log entry at handler entry for every mutating admin
+ * action.  Records the remote address (Apache adds X-Forwarded-For; if
+ * absent, ri->remote_addr is loopback since we bind loopback-only) plus
+ * any X-Sensor-User the Axis proxy injects when it knows the caller. */
+static void audit_log(struct mg_connection *conn, const char *action)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    const char *xff  = mg_get_header(conn, "X-Forwarded-For");
+    const char *user = mg_get_header(conn, "X-Sensor-User");
+    syslog(LOG_NOTICE,
+           "antitailgate: audit action=%s remote=%s xff=%s user=%s",
+           action ? action : "?",
+           (ri && ri->remote_addr[0]) ? ri->remote_addr : "?",
+           xff  ? xff  : "-",
+           user ? user : "-");
 }
 
 static void send_error(struct mg_connection *conn,
@@ -828,6 +853,7 @@ static int handler_config_post(struct mg_connection *conn, void *cbdata)
 
     if (!require_mutating_request(conn, true))
         return 400;
+    audit_log(conn, "config-post");
 
     char *body = read_body(conn);
     char err[256] = "";
@@ -1085,8 +1111,15 @@ static int handler_clear_history(struct mg_connection *conn, void *cbdata)
 
     if (!require_mutating_request(conn, true))
         return 400;
+    audit_log(conn, "clear-history");
 
     history_clear();
+    /* Also clear runtime state so a stale token or an active stateful
+     * alarm doesn't linger past what the operator sees.  event_publisher
+     * ignores a false-send when nothing is active. */
+    token_clear_all();
+    event_publisher_send_alarm(false);
+
     send_json(conn, 200, "{\"status\":\"ok\",\"message\":\"History cleared\"}");
     return 200;
 }
@@ -1097,6 +1130,7 @@ static int handler_reset_defaults(struct mg_connection *conn, void *cbdata)
 
     if (!require_mutating_request(conn, true))
         return 400;
+    audit_log(conn, "reset-defaults");
 
     config_set("TokenExpirationSeconds", "7");
     config_set("AoaScenarioId", "1");
@@ -1117,6 +1151,12 @@ static int handler_reset_defaults(struct mg_connection *conn, void *cbdata)
     event_subscriber_resubscribe("1");
     input_trigger_resubscribe("none");
 
+    /* Runtime state also comes back to defaults, so the operator sees a
+     * clean dashboard immediately, not stale tokens or a stuck alarm. */
+    token_clear_all();
+    history_clear();
+    event_publisher_send_alarm(false);
+
     send_json(conn, 200, "{\"status\":\"ok\",\"message\":\"Reset to defaults\"}");
     return 200;
 }
@@ -1127,6 +1167,7 @@ static int handler_test_alarm_action(struct mg_connection *conn, void *cbdata)
 
     if (!require_mutating_request(conn, true))
         return 400;
+    audit_log(conn, "test-alarm-action");
 
     char *type = config_get_string("AlarmActionType", "none");
     if (!type || strcmp(type, "none") == 0) {
@@ -1149,9 +1190,15 @@ static void register_handler(const char *path, mg_request_handler handler)
 bool web_server_init(int port)
 {
     const char *options[] = {
-        "listening_ports",    "127.0.0.1:8080",
-        "num_threads",        "10",
-        "request_timeout_ms", "10000",
+        "listening_ports",     "127.0.0.1:8080",
+        /* 30 threads: 10 was low enough that a slowloris client can lock
+         * the pool.  Threads are cheap on this workload. */
+        "num_threads",         "30",
+        /* Was 10s.  This is per-recv, not total; a slow reader can hold
+         * a thread indefinitely.  3s covers legitimate LAN latency. */
+        "request_timeout_ms",  "3000",
+        "keep_alive_timeout_ms", "200",
+        "tcp_nodelay",         "1",
         NULL
     };
     struct mg_callbacks callbacks;

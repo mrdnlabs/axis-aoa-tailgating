@@ -77,6 +77,9 @@ void alarm_record_update(uint64_t alarm_id, const char *action_status);
 /** Clear all history. */
 void history_clear(void);
 
+/** Drop every in-flight token.  Used by admin reset paths. */
+void token_clear_all(void);
+
 /** Update the token expiration duration (called on config change). */
 void token_set_expiration(int seconds);
 
