@@ -40,6 +40,13 @@ typedef struct {
     char     action_status[32];
 } AlarmRecord;
 
+typedef struct {
+    int      token_count;
+    uint64_t badge_reads;   /* monotonic, session total */
+    uint64_t authorized;
+    uint64_t alarms;
+} TokenStats;
+
 /**
  * Initialize the token manager (creates mutex, etc.).
  * expiration_seconds: default token TTL.
@@ -59,6 +66,9 @@ bool token_consume(const char *source);
 
 /** Return the number of currently active (unexpired) tokens. */
 int token_count(void);
+
+/** Snapshot current token count plus monotonic session counters. */
+void token_get_stats(TokenStats *out);
 
 /** Remove expired tokens. Called by GLib timer every second. */
 void token_expire_tick(void);

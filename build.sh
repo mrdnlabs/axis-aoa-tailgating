@@ -12,25 +12,42 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Download CivetWeb files if not present
+# Download + integrity-check CivetWeb.  A git tag is mutable, so pin the
+# content by sha256 (v1.16, verified 2026-10): tampering or a moved tag
+# fails the build instead of compiling unknown code into the HTTP server.
 CIVETWEB_VERSION="1.16"
-CIVETWEB_C="${SCRIPT_DIR}/app/civetweb.c"
-CIVETWEB_H="${SCRIPT_DIR}/app/civetweb.h"
+BASE_URL="https://raw.githubusercontent.com/civetweb/civetweb/v${CIVETWEB_VERSION}"
 
-if [[ ! -f "$CIVETWEB_C" || ! -f "$CIVETWEB_H" ]]; then
-  echo "Downloading CivetWeb ${CIVETWEB_VERSION}..."
-  BASE_URL="https://raw.githubusercontent.com/civetweb/civetweb/v${CIVETWEB_VERSION}"
-  curl -fsSL "${BASE_URL}/src/civetweb.c"      -o "${SCRIPT_DIR}/app/civetweb.c"
-  curl -fsSL "${BASE_URL}/include/civetweb.h"  -o "${SCRIPT_DIR}/app/civetweb.h"
-  curl -fsSL "${BASE_URL}/src/md5.inl"         -o "${SCRIPT_DIR}/app/md5.inl"
-  curl -fsSL "${BASE_URL}/src/sort.inl"        -o "${SCRIPT_DIR}/app/sort.inl"
-  curl -fsSL "${BASE_URL}/src/match.inl"       -o "${SCRIPT_DIR}/app/match.inl"
-  curl -fsSL "${BASE_URL}/src/response.inl"    -o "${SCRIPT_DIR}/app/response.inl"
-  curl -fsSL "${BASE_URL}/src/sha1.inl"        -o "${SCRIPT_DIR}/app/sha1.inl"
-  curl -fsSL "${BASE_URL}/src/timer.inl"       -o "${SCRIPT_DIR}/app/timer.inl"
-  curl -fsSL "${BASE_URL}/src/handle_form.inl" -o "${SCRIPT_DIR}/app/handle_form.inl"
-  echo "CivetWeb downloaded."
-fi
+# file  path-under-repo  remote-subpath  sha256
+CIVETWEB_FILES=(
+  "civetweb.c|src/civetweb.c|e572a29680c063b6202377131cee65f238fc801692a57ec7797fdad381fde786"
+  "civetweb.h|include/civetweb.h|e3a12c0a659b3bc6f75aa67799232ca343572dcb3add8b2475666633fa4afad3"
+  "md5.inl|src/md5.inl|0b9c95a45d00c4aa74c2ef0de24baad7f9961a95c3d5835a262a31173d0c3916"
+  "sort.inl|src/sort.inl|2a371807ed7e4b6cf078251dd36df4ea3385becafdc4dd0c50d39f5258e59f6e"
+  "match.inl|src/match.inl|1f575b361135b13c377fa84b6d5f9b6faf8b6c6416dfec476509d09a7eb743e3"
+  "response.inl|src/response.inl|e6455d9739845593e18c3ae756b6791cb051f57fafd40806b65ba56e2ff7b20b"
+  "sha1.inl|src/sha1.inl|8955644bf6aa8ffdae8a3ab61d09eac1d8bfe0abd160edf83fbe8e1a357151e8"
+  "timer.inl|src/timer.inl|dfb39732ea7a105eaa385154a3a1ac4f5a71ae9c29401a5c9a388c3d9d06f012"
+  "handle_form.inl|src/handle_form.inl|bddad9e1e9d0ec227cf3ad3ca6bd44ffacf44bd756f631527d2b5798c4e36fbf"
+)
+
+for entry in "${CIVETWEB_FILES[@]}"; do
+  IFS='|' read -r name sub want <<< "$entry"
+  dst="${SCRIPT_DIR}/app/${name}"
+  if [[ ! -f "$dst" ]]; then
+    echo "Downloading CivetWeb ${name}..."
+    curl -fsSL "${BASE_URL}/${sub}" -o "$dst"
+  fi
+  got="$(sha256sum "$dst" | cut -d' ' -f1)"
+  if [[ "$got" != "$want" ]]; then
+    echo "ERROR: CivetWeb ${name} sha256 mismatch:" >&2
+    echo "  expected $want" >&2
+    echo "  got      $got" >&2
+    echo "Refusing to build with unverified vendored sources. Delete app/${name} to re-download." >&2
+    exit 1
+  fi
+done
+echo "CivetWeb ${CIVETWEB_VERSION} verified."
 
 IMAGE_TAG="antitailgate-acap:${ARCH}"
 EAP_NAME="Anti-Tailgating_1_0_0_${ARCH}.eap"
@@ -57,11 +74,11 @@ echo ""
 echo "Build complete: ${EAP_PATH}"
 echo "Size: $(du -h "${EAP_PATH}" | cut -f1)"
 echo ""
-echo "To install on device (see .env.devices for credentials):"
-echo "  python3 -c \""
-echo "  import requests; from requests.auth import HTTPDigestAuth"
-echo "  with open('${EAP_PATH}', 'rb') as f:"
-echo "    r = requests.post('http://CAMERA_IP/axis-cgi/applications/upload.cgi',"
-echo "        auth=HTTPDigestAuth('CAMERA_USER', 'CAMERA_PASS'),"
-echo "        files={'packfil': f})"
-echo "  print(r.status_code, r.text)\""
+echo "To install (set CAMERA_IP / CAMERA_USER / CAMERA_PASS from .env.devices):"
+echo "  curl -k --anyauth -u \"\$CAMERA_USER:\$CAMERA_PASS\" \\"
+echo "    -F \"packfil=@${EAP_PATH}\" \\"
+echo "    \"https://\$CAMERA_IP/axis-cgi/applications/upload.cgi\""
+echo ""
+echo "  # unsigned builds need AllowUnsigned=true first:"
+echo "  curl -k --anyauth -u \"\$CAMERA_USER:\$CAMERA_PASS\" -X POST \\"
+echo "    \"https://\$CAMERA_IP/axis-cgi/applications/config.cgi?action=set&name=AllowUnsigned&value=true\""

@@ -1,3 +1,6 @@
+<!-- SUPERSEDED-BANNER -->
+> **Note:** this document predates the proxy-only / authenticated API rework. The embedded server is loopback-only — there is **no** direct `:8080` access. For the current, accurate contract see [api-reference.md](api-reference.md); for access/credentials see [camera-credentials.md](camera-credentials.md). Port/path examples below may be out of date.
+
 # Architecture: Anti-Tailgating ACAP
 
 ## System Context

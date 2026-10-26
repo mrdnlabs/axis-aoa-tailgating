@@ -186,6 +186,11 @@ bool config_set(const char *name, const char *value)
     return true;
 }
 
+struct _AXParameter *config_ax_parameter(void)
+{
+    return g_ax_param;
+}
+
 void config_cleanup(void)
 {
     if (g_ax_param) {

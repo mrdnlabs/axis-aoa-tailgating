@@ -1,5 +1,5 @@
 #include "event_publisher.h"
-#include "config.h"
+#include "settings.h"
 
 #include <axsdk/axevent.h>
 #include <glib.h>
@@ -140,7 +140,9 @@ static gboolean do_send_event(gpointer data)
     }
 
     if (p->active) {
-        int clear_seconds = config_get_int("AlarmClearSeconds", 2);
+        Settings s;
+        settings_get(&s);
+        int clear_seconds = s.alarm_clear_seconds;
         if (clear_seconds < 1)
             clear_seconds = 1;
         if (clear_seconds > 60)

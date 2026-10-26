@@ -1,323 +1,166 @@
 # API Reference: Anti-Tailgating ACAP
 
-The embedded CivetWeb server listens on port 8080. All endpoints are accessible directly at:
+All endpoints are served **only** through the Axis reverse proxy (TLS + device
+authentication). The embedded web server binds `127.0.0.1:8080` and is **not**
+reachable from the network — there is no direct `:8080` access.
 
 ```
-http://<camera-ip>:8080/<endpoint>
+https://<camera-ip>/local/antitailgate/<role>/<endpoint>
 ```
 
-They are also available via the Apache reverse proxy (reliability varies by camera configuration):
+Two roles, enforced by the device at the proxy layer:
 
-```
-http://<camera-ip>/local/antitailgate/api/<endpoint>
-```
+| Prefix | Access level | Endpoints |
+|---|---|---|
+| `/local/antitailgate/ingest/` | **operator** | `badge-read` |
+| `/local/antitailgate/admin/`  | **admin**    | everything else |
 
-The web UI uses the direct port 8080 URL. External integrations (door controllers, badge readers) should also use port 8080 directly.
+### Request rules
+
+- **Mutating endpoints require `POST`.** A `GET` to one returns `405`.
+- **Admin mutating endpoints require** `Content-Type: application/json` **and**
+  `X-Requested-With: antitailgate` (CSRF defense). Missing/ wrong → `415` / `403`.
+- The ingest `badge-read` endpoint requires `POST`; a body, if present, must be
+  `application/json`. An empty `POST` is accepted (mints an anonymous token).
+- Non-canonical paths (encoded `..`, backslashes) are rejected with `400`.
+- All examples use `curl -k --anyauth -u "$U:$P"`; set `$U`/`$P` from `.env.devices`.
 
 ---
 
-## Endpoints
+## POST `/ingest/badge-read`  (operator)
 
-### POST `/badge-read`
+Creates one access token. Optional JSON body enriches the event history.
 
-Creates one access token. Accepts an optional JSON body to enrich event history with door and card information.
+**Body** (optional): `{"door": "Front Door", "card": "ABC123"}`
+- `door` → stored as the event `source`; `card` (or legacy `badge_id`) → `badge_id`.
+- `card`/`door` may be a JSON string or integer.
 
-**Request body** (optional):
-```json
-{
-  "door": "Front Door",
-  "card": "ABC123"
-}
-```
-
-When the body is present, `door` is stored as the `source` field and `card` as the `badge_id` field in the event history. If no body is provided, `source` defaults to `"http"` and `badge_id` comes from the `badge_id` query parameter (or `"unknown"`).
-
-**Query parameters** (optional, used when no JSON body is provided):
-- `badge_id` — Badge identifier string for logging
-
-**Examples**:
-
-Door controller with JSON body:
-```bash
-curl -s -X POST \
+```sh
+curl -k --anyauth -u "$U:$P" -X POST \
   -H "Content-Type: application/json" \
   -d '{"door":"Front Door","card":"ABC123"}' \
-  "http://192.168.1.238:8080/badge-read"
+  "https://$CAM/local/antitailgate/ingest/badge-read"
+
+# bodyless trigger (anonymous token)
+curl -k --anyauth -u "$U:$P" -X POST \
+  "https://$CAM/local/antitailgate/ingest/badge-read"
 ```
 
-Simple POST with no body:
-```bash
-curl -s -X POST "http://192.168.1.238:8080/badge-read"
-```
-
-With badge ID in query string:
-```bash
-curl -s -X POST "http://192.168.1.238:8080/badge-read?badge_id=card-42"
-```
-
-**Response** `200 OK`:
-```json
-{
-  "status": "ok",
-  "message": "Token created",
-  "token_count": 1,
-  "badge_id": "ABC123"
-}
-```
+`200`: `{"status":"ok","message":"Token created","token_count":1,"badge_id":"ABC123","source":"Front Door"}`
 
 ---
 
-### POST `/threshold-crossing`
+## POST `/admin/threshold-crossing`  (admin)
 
-Simulates a line crossing event. Used for testing or as a fallback when AOA is not installed.
+Simulates a line crossing: consumes a token, or raises the alarm if none.
+Requires the CSRF header.
 
-**Request**: No body required.
-
-**Example**:
-```bash
-curl -s -X POST "http://192.168.1.238:8080/threshold-crossing"
+```sh
+curl -k --anyauth -u "$U:$P" -X POST \
+  -H "Content-Type: application/json" -H "X-Requested-With: antitailgate" \
+  "https://$CAM/local/antitailgate/admin/threshold-crossing"
 ```
 
-**Response** `200 OK` — token consumed (authorized entry):
-```json
-{
-  "status": "ok",
-  "outcome": "authorized",
-  "tokens_remaining": 0
-}
-```
-
-**Response** `200 OK` — no token (tailgating alarm):
-```json
-{
-  "status": "ok",
-  "outcome": "alarm",
-  "tokens_remaining": 0
-}
-```
-
-When outcome is `"alarm"`, the application fires the native Axis `TailgatingAlarm` event, which can drive camera action rules.
+`200`: `{"status":"ok","outcome":"authorized|alarm","tokens_remaining":N}`
 
 ---
 
-### GET `/status`
+## GET `/admin/status`  (admin)
 
-Returns current system status including token count, event history, and alarm history.
-
-**Example**:
-```bash
-curl -s "http://192.168.1.238:8080/status"
+```sh
+curl -k --anyauth -u "$U:$P" "https://$CAM/local/antitailgate/admin/status"
 ```
 
-**Response** `200 OK`:
 ```json
 {
-  "token_count": 1,
-  "events": [
-    {
-      "timestamp": "2026-03-08T10:15:01Z",
-      "type": "badge_read",
-      "source": "Front Door",
-      "badge_id": "ABC123",
-      "outcome": "token_created"
-    },
-    {
-      "timestamp": "2026-03-08T10:15:06Z",
-      "type": "line_crossing",
-      "source": "aoa",
-      "badge_id": "",
-      "outcome": "authorized"
-    },
-    {
-      "timestamp": "2026-03-08T10:15:20Z",
-      "type": "line_crossing",
-      "source": "aoa",
-      "badge_id": "",
-      "outcome": "alarm"
-    }
-  ],
-  "alarms": [
-    {
-      "timestamp": "2026-03-08T10:15:20Z"
-    }
-  ]
+  "token_count": 0,
+  "stats": { "badge_reads": 12, "authorized": 9, "alarms": 2 },
+  "events": [ { "timestamp": "…Z", "type": "badge_read|line_crossing",
+                "source": "…", "outcome": "token_created|authorized|alarm|expired",
+                "badge_id": "…" } ],
+  "alarms": [ { "timestamp": "…Z", "action_status": "request_succeeded|…" } ]
 }
 ```
 
-**Field descriptions**:
-- `token_count` — Number of active (unexpired) tokens currently queued
-- `events` — Last 50 events (badge reads + line crossings), newest last
-- `events[].source` — Origin of the event: door name (from JSON body), `"http"` (plain POST), or `"aoa"` (AOA event)
-- `events[].badge_id` — Card number from JSON body, query string, or empty string
-- `alarms` — Last 50 alarm records, newest last
+`stats` are monotonic session counters (correct even after the 50-entry history
+ring wraps). `events`/`alarms` are the most recent 50 each.
 
 ---
 
-### GET `/config`
+## GET / POST `/admin/config`  (admin)
 
-Returns current configuration as JSON.
+`GET` returns the current configuration. Secrets are **never** returned as
+values — only `…Configured` booleans:
 
-**Example**:
-```bash
-curl -s "http://192.168.1.238:8080/config"
-```
-
-**Response** `200 OK`:
 ```json
 {
-  "TokenExpirationSeconds": 7,
-  "AoaScenarioId": 1
+  "TokenExpirationSeconds": 7, "AoaScenarioId": "1", "InputTriggerPort": "none",
+  "AlarmClearSeconds": 2, "AlarmActionType": "none",
+  "AlarmActionTlsMode": "verify", "AlarmActionHost": "", "AlarmActionPort": "1",
+  "AlarmActionDuration": "5", "AlarmActionUser": "", "AlarmActionUrl": "",
+  "AlarmActionMethod": "GET", "AlarmActionPayload": "",
+  "AlarmActionPassConfigured": false, "AlarmActionHeaderConfigured": false,
+  "AlarmActionPinConfigured": false
 }
 ```
 
----
+`POST` is **two-phase**: every field is validated first; if any field is
+invalid the whole request is rejected with `400` and **nothing** is persisted.
+Only changed fields are written. Unknown fields are rejected.
 
-### POST `/config`
-
-Updates one or more configuration parameters. Only supplied fields are updated.
-
-**Request body** (JSON, partial updates supported):
-```json
-{
-  "TokenExpirationSeconds": 10,
-  "AoaScenarioId": 2
-}
+```sh
+curl -k --anyauth -u "$U:$P" -X POST \
+  -H "Content-Type: application/json" -H "X-Requested-With: antitailgate" \
+  -d '{"TokenExpirationSeconds":10,"AlarmActionType":"custom_http",
+       "AlarmActionTlsMode":"pin","AlarmActionUrl":"https://host/hook",
+       "AlarmActionPin":"sha256//BASE64…"}' \
+  "https://$CAM/local/antitailgate/admin/config"
 ```
 
-**Example**:
-```bash
-curl -s -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"TokenExpirationSeconds": 10}' \
-  "http://192.168.1.238:8080/config"
-```
+`200`: `{"status":"ok","updated":["TokenExpirationSeconds",…]}`
 
-**Response** `200 OK`:
-```json
-{
-  "status": "ok",
-  "updated": ["TokenExpirationSeconds"]
-}
-```
+### Secret fields (password / header)
 
-**Response** `400 Bad Request` (invalid JSON):
-```json
-{
-  "status": "error",
-  "message": "Invalid JSON body"
-}
-```
+`AlarmActionPass` and `AlarmActionHeader` are **keep-if-blank**: send them only
+to change the value. Omitting them (or sending `""`) leaves the stored value
+untouched. To erase: `{"AlarmActionClearPass": true}` /
+`{"AlarmActionClearHeader": true}`.
 
----
+### Field summary
 
-### GET `/test`
-
-Health check endpoint. Always returns 200 if the application is running.
-
-**Example**:
-```bash
-curl -s "http://192.168.1.238:8080/test"
-```
-
-**Response** `200 OK`:
-```json
-{
-  "status": "ok",
-  "app": "antitailgate",
-  "version": "1.0.0"
-}
-```
-
----
-
-### POST `/clear-history`
-
-Clears the in-memory event and alarm history.
-
-**Example**:
-```bash
-curl -s -X POST "http://192.168.1.238:8080/clear-history"
-```
-
-**Response** `200 OK`:
-```json
-{
-  "status": "ok",
-  "message": "History cleared"
-}
-```
-
----
-
-### POST `/reset-defaults`
-
-Resets all configuration parameters to their factory defaults.
-
-**Example**:
-```bash
-curl -s -X POST "http://192.168.1.238:8080/reset-defaults"
-```
-
-**Response** `200 OK`:
-```json
-{
-  "status": "ok",
-  "message": "Defaults restored"
-}
-```
-
----
-
-## Door Controller Integration
-
-Configure the door controller (e.g., Axis A1210) to POST a JSON body to the badge-read endpoint on each access-granted event.
-
-**Target URL**:
-```
-http://192.168.1.238:8080/badge-read
-```
-
-**Request body**:
-```json
-{"door": "Front Door", "card": "%CardNumber%"}
-```
-
-Replace `%CardNumber%` with the door controller's variable substitution syntax for the credential number.
-
-On the Axis A1210, action rules must be configured via VAPIX SOAP (not the web UI) because the A1210's `accesscontrol-e2e` web interface does not expose a "System → Events → Rules" page. Use the `com.axis.action.fixed.notification.http` action template at `/vapix/services`. See [docs/learnings.md](learnings.md) for details.
-
----
-
-## Axis Event System Integration
-
-On every tailgating alarm the application publishes:
-
-| Property | Value |
+| Field | Values |
 |---|---|
-| Topic | `tnsaxis:CameraApplicationPlatform/antitailgate/TailgatingAlarm` |
-| Key | `active` |
-| Type | `bool` |
-| Value on alarm | `true` |
-
-This event appears in the camera under **System → Events → Rules → Add rule → Trigger → Application → Anti-Tailgating → TailgatingAlarm**. It can drive any built-in camera action without requiring an external alarm system.
+| `TokenExpirationSeconds` | int 1–3600 |
+| `AlarmClearSeconds` | int 1–60 |
+| `AoaScenarioId` | 1–64 chars `[A-Za-z0-9-]`, non-empty |
+| `InputTriggerPort` | `"none"` or a device-native 0-based port index |
+| `AlarmActionType` | `none` \| `virtual_input` \| `a9210_output` \| `custom_http` |
+| `AlarmActionTlsMode` | `verify` \| `pin` \| `noverify` \| `http` |
+| `AlarmActionHost` | hostname / IP / `[ipv6]`, optional `:port` |
+| `AlarmActionPort` | numeric 1–65535 |
+| `AlarmActionDuration` | seconds, numeric 1–3600 |
+| `AlarmActionMethod` | `GET` \| `POST` \| `PUT` (custom_http only) |
+| `AlarmActionUrl` | `http://` or `https://`, no embedded credentials |
+| `AlarmActionPin` | `sha256//…` (TLS pin mode) |
 
 ---
 
-## Error Responses
+## POST `/admin/test-alarm-action`  (admin)
 
-All endpoints return standard HTTP status codes:
+Runs the configured action once, **synchronously**, and returns the HTTP
+result. Does **not** publish the TailgatingAlarm event.
 
-| Code | Meaning |
-|------|---------|
-| `200` | Success |
-| `400` | Bad request (malformed JSON, missing required params) |
-| `405` | Method not allowed |
-| `500` | Internal server error |
+`200`: `{"status":"ok","result":"HTTP 200"}` — `502` with the result on failure.
 
-Error response body:
-```json
-{
-  "status": "error",
-  "message": "<description>"
-}
-```
+## POST `/admin/clear-history`  (admin)
+
+Clears event/alarm history **and** drops all active tokens, and clears the
+stateful alarm. `200`.
+
+## POST `/admin/reset-defaults`  (admin)
+
+Restores default configuration and clears runtime state. `200`.
+
+## GET `/admin/test`  (admin)
+
+Health check: `{"status":"ok","app":"antitailgate","version":"1.0.0"}`.

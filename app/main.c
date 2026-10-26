@@ -1,4 +1,5 @@
 #include "config.h"
+#include "settings.h"
 #include "token_manager.h"
 #include "event_subscriber.h"
 #include "event_publisher.h"
@@ -71,19 +72,19 @@ int main(void)
      * CURLOPT_NOSIGNAL=1L keeps its own alarm() calls out of our way. */
     signal(SIGPIPE, SIG_IGN);
 
-    /* 1. Configuration */
+    /* 1. Configuration + validated snapshot (snapshot reads params once and
+     *    registers change callbacks; all later reads hit memory, not D-Bus). */
     if (!config_init(APP_NAME)) {
         syslog(LOG_ERR, "antitailgate: config_init failed");
         return 1;
     }
+    settings_init();
 
-    int   ttl      = config_get_int("TokenExpirationSeconds", 7);
-    char *scenario = config_get_string("AoaScenarioId", "1");
-    char *io_port  = config_get_string("InputTriggerPort", "none");
-
+    Settings s;
+    settings_get(&s);
 
     /* 2. Token manager */
-    token_manager_init(ttl);
+    token_manager_init(s.token_ttl);
 
     /* 3. Alarm handler (libcurl) */
     alarm_handler_init();
@@ -111,27 +112,25 @@ int main(void)
     g_timeout_add_seconds(1, on_expire_timer, NULL);
 
     /* 6. AOA event subscription (non-fatal if AOA not installed) */
-    bool aoa_ok = event_subscriber_init(scenario);
+    bool aoa_ok = event_subscriber_init(s.aoa_scenario_id);
     if (!aoa_ok) {
         syslog(LOG_WARNING,
                "antitailgate: AOA subscription failed; "
-               "HTTP fallback (/api/threshold-crossing) remains available");
+               "HTTP threshold-crossing remains available");
     }
 
     /* 7. I/O input trigger (non-fatal) */
-    bool io_ok = input_trigger_init(io_port);
+    bool io_ok = input_trigger_init(s.input_port);
     if (!io_ok) {
         syslog(LOG_WARNING,
                "antitailgate: I/O input trigger failed for port '%s'",
-               io_port);
+               s.input_port);
     }
 
     syslog(LOG_INFO,
            "antitailgate: running (port=%d, TTL=%ds, scenario=%s, aoa=%s, io=%s)",
-           WEB_PORT, ttl, scenario, aoa_ok ? "yes" : "no",
-           io_ok ? io_port : "failed");
-    free(scenario);
-    free(io_port);
+           WEB_PORT, s.token_ttl, s.aoa_scenario_id, aoa_ok ? "yes" : "no",
+           io_ok ? s.input_port : "failed");
 
     /* 8. Block until signal */
     g_main_loop_run(g_loop);
@@ -157,6 +156,7 @@ int main(void)
     signal(SIGALRM, on_cleanup_alarm);
     alarm(5);
 
+    alarm_handler_begin_shutdown();  /* abort in-flight workers promptly */
     web_server_cleanup();
     alarm_handler_drain(3000);
     input_trigger_cleanup();

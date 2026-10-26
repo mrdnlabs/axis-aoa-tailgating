@@ -1,122 +1,67 @@
-# Camera Credentials & Device Info
+# Device Inventory & Access (local test rig)
 
-## Devices
+> **Credentials and device IPs are NOT stored here.** This repository is public.
+> Keep per-device IPs, usernames, and passwords in `.env.devices` at the repo
+> root (git-ignored, see `.gitignore`). Rotate any credential that was ever
+> committed to this repo's history.
 
-### Camera — Axis Q3538-SLVE
+## Devices used for development
 
-| Property | Value |
-|---|---|
-| IP Address | 192.168.1.238 |
-| Model | Axis Q3538-SLVE |
-| Architecture | **aarch64** (ARTPEC-8) |
-| Firmware | AXIS OS 12.9.57 |
-| Object Analytics | Installed, Running (v1.23.66) |
-| Install target | `Anti-Tailgating_1_0_0_aarch64.eap` |
-| Web UI | `http://192.168.1.238/local/antitailgate/` |
+| Role | Model | Arch | Notes |
+|---|---|---|---|
+| Camera | AXIS Q3538-SLVE | aarch64 (ARTPEC-8) | Runs the ACAP. Object Analytics bundled. |
+| Door controller | AXIS A1210 | armv7hf | Source of access-granted events (not an ACAP host). |
 
-**Credentials**:
+Put the live values in `.env.devices`:
 
-| User | Password | Notes |
-|---|---|---|
-| `admin` | `admin` | **Working** — set after factory default, Mar 2026 |
-
-### Door Controller — Axis A1210
-
-| Property | Value |
-|---|---|
-| IP Address | 192.168.1.233 |
-| Model | Axis A1210 |
-| Architecture | armv7hf |
-| Firmware | AXIS OS 12.8.55.1 |
-| Web UI | `http://192.168.1.233` (accesscontrol-e2e interface) |
-
-**Credentials**:
-
-| User | Password | Notes |
-|---|---|---|
-| `root` | `pass` | Verified working |
-
----
-
-## Authentication Notes
-
-### Camera (Q3538-SLVE)
-
-- Uses **HTTP Digest auth** (not Basic)
-- Use `--digest` flag with curl, or `HTTPDigestAuth` with Python requests
-- Basic auth (`--basic`) is rejected
-- `curl` combined with `--digest` and multipart `--form` upload fails — use Python `requests` for EAP upload
-
-### Door Controller (A1210)
-
-- Uses **HTTP Digest auth**
-- Web UI uses the `accesscontrol-e2e` interface — there is NO "System → Events → Rules" page
-- Action rules must be configured via VAPIX SOAP at `/vapix/services`
-- Standard VAPIX CGI endpoints and SOAP action rule APIs work normally
-
----
-
-## Camera VAPIX Examples
-
-```bash
-# List installed apps
-curl -s --digest -u 'admin:admin' \
-  'http://192.168.1.238/axis-cgi/applications/list.cgi'
-
-# Get device info
-curl -s --digest -u 'admin:admin' \
-  'http://192.168.1.238/axis-cgi/param.cgi?action=list&group=Properties.System.Architecture,Brand.ProdNbr'
-
-# Upload .eap (use Python — curl has issues with Digest + multipart)
-python3 -c "
-import requests
-from requests.auth import HTTPDigestAuth
-auth = HTTPDigestAuth('admin', 'admin')
-with open('app/Anti-Tailgating_1_0_0_aarch64.eap', 'rb') as f:
-    r = requests.post('http://192.168.1.238/axis-cgi/applications/upload.cgi',
-        auth=auth,
-        files={'packfil': ('Anti-Tailgating_1_0_0_aarch64.eap', f, 'application/octet-stream')})
-print(r.status_code, r.text)
-"
-
-# Start/stop/restart the app
-curl -s --digest -u 'admin:admin' \
-  'http://192.168.1.238/axis-cgi/applications/control.cgi?action=start&package=antitailgate'
-
-curl -s --digest -u 'admin:admin' \
-  'http://192.168.1.238/axis-cgi/applications/control.cgi?action=restart&package=antitailgate'
+```sh
+CAMERA_IP=...
+CAMERA_USER=...
+CAMERA_PASS=...
+CAMERA_AUTH=basic          # AXIS OS 12.9+ default policy is basic_digest
+DOOR_CONTROLLER_IP=...
+DOOR_CONTROLLER_USER=...
+DOOR_CONTROLLER_PASS=...
 ```
 
----
+## Authentication notes
 
-## Door Controller VAPIX SOAP Notes
+- AXIS OS 12.x defaults to the `basic_digest` policy. Use `curl --anyauth`,
+  which negotiates whichever the device offers; do not hard-code `--digest`
+  (a Basic-only device will 401) or `--basic`.
+- `curl --anyauth` with `-F` multipart upload works for `upload.cgi` on
+  current firmware; the old "must use Python requests" note no longer applies.
 
-The A1210 SOAP endpoint is at `http://192.168.1.233/vapix/services`.
+## Common VAPIX calls
 
-Working SOAP actions:
-- `GetActionTemplates` — lists available action types including `com.axis.action.fixed.notification.http`
-- `GetActionRules` — lists configured rules
-- `GetRecipientTemplates` — lists notification target types
-- `AddActionRule` — creates a new action rule
+```sh
+# identify
+curl -k --anyauth -u "$CAMERA_USER:$CAMERA_PASS" \
+  "https://$CAMERA_IP/axis-cgi/param.cgi?action=list&group=Brand.ProdNbr"
 
-Non-working SOAP action:
-- `GetActionConditions` — returns `ter:ActionNotSupported`
+# allow unsigned, then upload
+curl -k --anyauth -u "$CAMERA_USER:$CAMERA_PASS" -X POST \
+  "https://$CAMERA_IP/axis-cgi/applications/config.cgi?action=set&name=AllowUnsigned&value=true"
+curl -k --anyauth -u "$CAMERA_USER:$CAMERA_PASS" \
+  -F "packfil=@app/Anti-Tailgating_1_0_0_aarch64.eap" \
+  "https://$CAMERA_IP/axis-cgi/applications/upload.cgi"
 
-The HTTP notification action template supports a configurable POST body. Use this to send `{"door":"<name>","card":"%CardNumber%"}` to the camera's `/badge-read` endpoint on each access-granted event.
+# start / restart
+curl -k --anyauth -u "$CAMERA_USER:$CAMERA_PASS" \
+  "https://$CAMERA_IP/axis-cgi/applications/control.cgi?action=restart&package=antitailgate"
+```
 
-See [docs/learnings.md](learnings.md) for full details on A1210 integration.
+## Door controller integration
 
----
+The A1210 is wired in as an **event source**, not an ACAP host. Configure its
+access-control rules (or an HTTP notification action) to `POST` an
+access-granted event to the camera's operator endpoint:
 
-## Enable Unsigned Applications (Camera Only)
+```
+POST https://<camera-ip>/local/antitailgate/ingest/badge-read
+Content-Type: application/json
+{"door":"<door name>","card":"<card id>"}
+```
 
-Required before installing the unsigned `.eap`.
-
-Cannot be done via VAPIX — intentionally restricted in AXIS OS 11+.
-
-**Steps:**
-1. Open `http://192.168.1.238` in a browser
-2. Log in as `admin` / `admin`
-3. Go to **Settings → Apps**
-4. Enable **"Allow unsigned applications"**
-5. Confirm the warning dialog
+In many deployments the VMS / access-control platform sends this directly,
+and the door controller is not involved at all.

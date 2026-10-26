@@ -10,6 +10,13 @@
 
 static AXEventHandler *g_event_handler   = NULL;
 static guint           g_subscription_id = 0;
+static char            g_current_id[65]  = "";
+
+/* A stateful AOA topic redelivers its current value right after subscribe.
+ * Treat the first delivery after a (re)subscribe as a baseline to sync
+ * against, not as a fresh crossing, so enabling the app while someone is
+ * mid-zone doesn't spuriously consume a token or raise an alarm. */
+static gboolean        g_baseline_pending = FALSE;
 
 /* ------------------------------------------------------------------ */
 /* AXEvent callback                                                    */
@@ -29,12 +36,14 @@ static void on_line_crossing(guint subscription, AXEvent *event, gpointer user_d
      *
      * Strategy: try to read 'active'; if it exists and is FALSE, skip.
      */
+    bool has_active = false;
     AXEventKeyValueSet *kv = (AXEventKeyValueSet *)ax_event_get_key_value_set(event);
     if (kv) {
         gboolean active_val = FALSE;
         GError  *err = NULL;
         if (ax_event_key_value_set_get_boolean(kv, "active", NULL,
                                                &active_val, &err)) {
+            has_active = true;
             if (!active_val) {
                 /* Falling edge of a fence event — ignore */
                 if (err) g_error_free(err);
@@ -44,6 +53,17 @@ static void on_line_crossing(guint subscription, AXEvent *event, gpointer user_d
         }
         if (err) g_error_free(err);
     }
+
+    /* Swallow the first stateful delivery after (re)subscribe: it is the
+     * current property value, not a new crossing.  Counting scenarios have
+     * no 'active' key and fire once per crossing, so never baseline those. */
+    if (g_baseline_pending && has_active) {
+        g_baseline_pending = FALSE;
+        syslog(LOG_DEBUG, "antitailgate: AOA baseline delivery ignored");
+        ax_event_free(event);
+        return;
+    }
+    g_baseline_pending = FALSE;
 
     syslog(LOG_INFO, "antitailgate: AOA crossing event received");
 
@@ -111,13 +131,15 @@ static bool do_subscribe(const char *scenario_id)
     }
 
     ax_event_key_value_set_free(kv);
+    g_strlcpy(g_current_id, scenario_id, sizeof g_current_id);
+    g_baseline_pending = TRUE;
     syslog(LOG_INFO,
            "antitailgate: subscribed to AOA scenario '%s'", scenario_id);
     return true;
 }
 
 /* ------------------------------------------------------------------ */
-/* Public API                                                          */
+/* Public API — all calls run on the GLib main loop                    */
 /* ------------------------------------------------------------------ */
 
 bool event_subscriber_init(const char *scenario_id)
@@ -132,6 +154,7 @@ bool event_subscriber_init(const char *scenario_id)
     if (!do_subscribe(scenario_id)) {
         ax_event_handler_free(g_event_handler);
         g_event_handler = NULL;
+        g_current_id[0] = '\0';
         return false;
     }
     return true;
@@ -139,16 +162,24 @@ bool event_subscriber_init(const char *scenario_id)
 
 bool event_subscriber_resubscribe(const char *scenario_id)
 {
+    if (!scenario_id || !scenario_id[0])
+        return false;
+
+    /* Idempotent: a save that didn't change the scenario (or a duplicate
+     * marshalled call) must not drop and recreate the subscription, which
+     * would miss crossings during the gap. */
+    if (g_event_handler && g_subscription_id &&
+        strcmp(scenario_id, g_current_id) == 0)
+        return true;
+
     if (!g_event_handler)
         return event_subscriber_init(scenario_id);
 
-    /* Tear down existing subscription */
     if (g_subscription_id) {
-        ax_event_handler_unsubscribe(g_event_handler,
-                                     g_subscription_id, NULL);
+        ax_event_handler_unsubscribe(g_event_handler, g_subscription_id, NULL);
         g_subscription_id = 0;
     }
-
+    g_current_id[0] = '\0';
     return do_subscribe(scenario_id);
 }
 
@@ -162,4 +193,5 @@ void event_subscriber_cleanup(void)
         g_event_handler = NULL;
         g_subscription_id = 0;
     }
+    g_current_id[0] = '\0';
 }

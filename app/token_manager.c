@@ -28,6 +28,13 @@ static uint64_t g_next_token_id = 1;
 static uint64_t g_next_alarm_id = 1;
 static int     g_expiration_seconds = 7;
 
+/* Monotonic session counters for the dashboard.  Deriving stats from the
+ * bounded history ring is wrong once it wraps (and double-counts expiries
+ * as badge reads); these never decrease for the life of the process. */
+static uint64_t g_stat_badge_reads = 0;
+static uint64_t g_stat_authorized  = 0;
+static uint64_t g_stat_alarms      = 0;
+
 static HistoryEvent g_events[MAX_HISTORY];
 static int          g_event_count = 0;
 static AlarmRecord  g_alarms[MAX_HISTORY];
@@ -146,6 +153,7 @@ int token_add(const char *badge_id, const char *source)
 
     push_event_locked(EVENT_BADGE_READ, OUTCOME_TOKEN_CREATED,
                       src, badge_id);
+    g_stat_badge_reads++;
 
     int count = g_token_count;
     g_mutex_unlock(&g_mutex);
@@ -164,6 +172,7 @@ bool token_consume(const char *source)
     if (g_token_count == 0) {
         /* ALARM: no valid token */
         push_event_locked(EVENT_LINE_CROSSING, OUTCOME_ALARM, source, NULL);
+        g_stat_alarms++;
         g_mutex_unlock(&g_mutex);
 
         syslog(LOG_WARNING, "antitailgate: TAILGATING ALARM (source=%s)",
@@ -181,6 +190,7 @@ bool token_consume(const char *source)
     g_token_count--;
 
     push_event_locked(EVENT_LINE_CROSSING, OUTCOME_AUTHORIZED, source, badge_id);
+    g_stat_authorized++;
 
     g_mutex_unlock(&g_mutex);
 
@@ -196,6 +206,19 @@ int token_count(void)
     int count = g_token_count;
     g_mutex_unlock(&g_mutex);
     return count;
+}
+
+void token_get_stats(TokenStats *out)
+{
+    if (!out)
+        return;
+    g_mutex_lock(&g_mutex);
+    expire_locked();
+    out->token_count = g_token_count;
+    out->badge_reads = g_stat_badge_reads;
+    out->authorized  = g_stat_authorized;
+    out->alarms      = g_stat_alarms;
+    g_mutex_unlock(&g_mutex);
 }
 
 void token_expire_tick(void)

@@ -1,9 +1,12 @@
+<!-- SUPERSEDED-BANNER -->
+> **Note:** this document predates the proxy-only / authenticated API rework. The embedded server is loopback-only — there is **no** direct `:8080` access. For the current, accurate contract see [api-reference.md](api-reference.md); for access/credentials see [camera-credentials.md](camera-credentials.md). Port/path examples below may be out of date.
+
 # Developer Guide: Anti-Tailgating ACAP
 
 ## Prerequisites
 
 - Docker Desktop with WSL2 integration enabled
-- Access to the target Axis camera (192.168.1.238, credentials in `.env.devices`)
+- Access to the target Axis camera ($CAM, credentials in `.env.devices`)
 - AXIS Object Analytics installed on the camera (for AOA event subscription)
 - Python 3 with `requests` library installed (for EAP upload)
 - Git and standard Unix tools in WSL
@@ -15,11 +18,11 @@
 Before building, query the camera to confirm its processor architecture:
 
 ```bash
-curl -s --digest -u 'admin:admin' \
+curl -s --anyauth -u "$U:$P" \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{"apiVersion":"1.0","method":"getAllProperties"}' \
-  http://192.168.1.238/axis-cgi/basicdeviceinfo.cgi \
+  https://$CAM/axis-cgi/basicdeviceinfo.cgi \
   | python3 -m json.tool
 ```
 
@@ -27,7 +30,7 @@ Look for `"Architecture"` in the response:
 - `"aarch64"` → ARTPEC-8 (e.g., Q3538-SLVE) — use `aarch64` build
 - `"armv7hf"` → ARTPEC-7 (e.g., P3245, P3265) — use `armv7hf` build
 
-The target device (Axis Q3538-SLVE at 192.168.1.238) is **aarch64**.
+The target device (Axis Q3538-SLVE at $CAM) is **aarch64**.
 
 ---
 
@@ -64,7 +67,7 @@ docker rm "${CID}"
 
 Signed EAP packages require an Axis developer account. For testing with unsigned packages:
 
-1. Open a browser and navigate to `http://192.168.1.238`
+1. Open a browser and navigate to `https://$CAM`
 2. Log in as `admin` / `admin`
 3. Go to **Settings → Apps**
 4. Enable **Allow unsigned applications**
@@ -86,8 +89,8 @@ from requests.auth import HTTPDigestAuth
 
 with open('app/Anti-Tailgating_1_0_0_aarch64.eap', 'rb') as f:
     r = requests.post(
-        'http://192.168.1.238/axis-cgi/applications/upload.cgi',
-        auth=HTTPDigestAuth('admin', 'admin'),
+        'https://$CAM/axis-cgi/applications/upload.cgi',
+        auth=("$U", "$P")  # from .env.devices,
         files={'packfil': ('Anti-Tailgating_1_0_0_aarch64.eap', f, 'application/octet-stream')}
     )
 print(r.status_code, r.text)
@@ -95,7 +98,7 @@ print(r.status_code, r.text)
 
 ### Via Web UI
 
-1. Navigate to `http://192.168.1.238` → **Settings → Apps**
+1. Navigate to `https://$CAM` → **Settings → Apps**
 2. Click **Add app (+)**
 3. Upload the `.eap` file from `app/`
 4. Wait for installation to complete and start the application
@@ -103,11 +106,11 @@ print(r.status_code, r.text)
 ### Start/restart the application
 
 ```bash
-curl -s --digest -u 'admin:admin' \
-  'http://192.168.1.238/axis-cgi/applications/control.cgi?action=start&package=antitailgate'
+curl -s --anyauth -u "$U:$P" \
+  'https://$CAM/axis-cgi/applications/control.cgi?action=start&package=antitailgate'
 
-curl -s --digest -u 'admin:admin' \
-  'http://192.168.1.238/axis-cgi/applications/control.cgi?action=restart&package=antitailgate'
+curl -s --anyauth -u "$U:$P" \
+  'https://$CAM/axis-cgi/applications/control.cgi?action=restart&package=antitailgate'
 ```
 
 ---
@@ -116,7 +119,7 @@ curl -s --digest -u 'admin:admin' \
 
 Navigate to:
 ```
-http://192.168.1.238/local/antitailgate/
+https://$CAM/local/antitailgate/
 ```
 
 Log in with camera credentials when prompted. The web UI provides:
@@ -125,7 +128,7 @@ Log in with camera credentials when prompted. The web UI provides:
 
 The camera's **Apps** page also links to the UI via the `settingPage` manifest entry:
 ```
-http://192.168.1.238 → Settings → Apps → Anti-Tailgating → Open
+https://$CAM → Settings → Apps → Anti-Tailgating → Open
 ```
 
 ---
@@ -140,21 +143,21 @@ http://192.168.1.238 → Settings → Apps → Anti-Tailgating → Open
 
 To list all AOA scenarios via VAPIX:
 ```bash
-curl -s --digest -u 'admin:admin' \
-  "http://192.168.1.238/local/objectanalytics/control.cgi?action=list&resource=scenario"
+curl -s --anyauth -u "$U:$P" \
+  "https://$CAM/local/objectanalytics/control.cgi?action=list&resource=scenario"
 ```
 
 ---
 
 ## Step 7: Configure Door Controller Integration (Optional)
 
-The Axis A1210 door controller (192.168.1.233) must be configured via VAPIX SOAP to send badge-read events to the camera. The A1210's web UI (`accesscontrol-e2e`) does not expose a "System → Events → Rules" page — SOAP is required.
+The Axis A1210 door controller ($DOOR) must be configured via VAPIX SOAP to send badge-read events to the camera. The A1210's web UI (`accesscontrol-e2e`) does not expose a "System → Events → Rules" page — SOAP is required.
 
 See [docs/learnings.md](learnings.md) for details on VAPIX SOAP action rules on the A1210.
 
 Target configuration on the A1210:
 - **Action**: HTTP notification (POST)
-- **URL**: `http://192.168.1.238:8080/badge-read`
+- **URL**: `https://$CAM/local/antitailgate/badge-read`
 - **Body**: `{"door":"Front Door","card":"%CardNumber%"}`
 - **Content-Type**: `application/json`
 - **Trigger**: Access granted event on the relevant door
@@ -167,13 +170,13 @@ After installation, run these tests in sequence.
 
 ### 1. Health Check
 ```bash
-curl -s "http://192.168.1.238:8080/test"
+curl -s "https://$CAM/local/antitailgate/test"
 # Expected: {"status":"ok","app":"antitailgate","version":"1.0.0"}
 ```
 
 ### 2. Badge Read (simple)
 ```bash
-curl -s -X POST "http://192.168.1.238:8080/badge-read"
+curl -s -X POST "https://$CAM/local/antitailgate/badge-read"
 # Expected: {"status":"ok","token_count":1,...}
 ```
 
@@ -182,21 +185,21 @@ curl -s -X POST "http://192.168.1.238:8080/badge-read"
 curl -s -X POST \
   -H "Content-Type: application/json" \
   -d '{"door":"Front Door","card":"ABC123"}' \
-  "http://192.168.1.238:8080/badge-read"
+  "https://$CAM/local/antitailgate/badge-read"
 # Expected: token_count incremented, badge_id="ABC123"
 # Check /status to confirm source="Front Door" in event history
 ```
 
 ### 4. Authorized Entry (Threshold Crossing with Token)
 ```bash
-curl -s -X POST "http://192.168.1.238:8080/badge-read"
-curl -s -X POST "http://192.168.1.238:8080/threshold-crossing"
+curl -s -X POST "https://$CAM/local/antitailgate/badge-read"
+curl -s -X POST "https://$CAM/local/antitailgate/threshold-crossing"
 # Expected: {"outcome":"authorized","tokens_remaining":0}
 ```
 
 ### 5. Tailgating Alarm (Crossing Without Token)
 ```bash
-curl -s -X POST "http://192.168.1.238:8080/threshold-crossing"
+curl -s -X POST "https://$CAM/local/antitailgate/threshold-crossing"
 # Expected: {"outcome":"alarm","tokens_remaining":0}
 # Check /status for alarm in history
 ```
@@ -212,9 +215,9 @@ This confirms the event was declared correctly on startup and received by the ca
 
 ### 7. Token Expiry
 ```bash
-curl -s -X POST "http://192.168.1.238:8080/badge-read"
+curl -s -X POST "https://$CAM/local/antitailgate/badge-read"
 sleep 10  # Wait longer than TokenExpirationSeconds (default 7)
-curl -s -X POST "http://192.168.1.238:8080/threshold-crossing"
+curl -s -X POST "https://$CAM/local/antitailgate/threshold-crossing"
 # Expected: alarm (token expired before crossing)
 ```
 
@@ -223,13 +226,13 @@ curl -s -X POST "http://192.168.1.238:8080/threshold-crossing"
 curl -s -X POST \
   -H "Content-Type: application/json" \
   -d '{"TokenExpirationSeconds":15}' \
-  "http://192.168.1.238:8080/config"
+  "https://$CAM/local/antitailgate/config"
 
-curl -s --digest -u 'admin:admin' \
-  'http://192.168.1.238/axis-cgi/applications/control.cgi?action=restart&package=antitailgate'
+curl -s --anyauth -u "$U:$P" \
+  'https://$CAM/axis-cgi/applications/control.cgi?action=restart&package=antitailgate'
 
 sleep 3
-curl -s "http://192.168.1.238:8080/config"
+curl -s "https://$CAM/local/antitailgate/config"
 # Expected: TokenExpirationSeconds = 15
 ```
 
@@ -244,7 +247,7 @@ Trigger an actual line crossing on the configured AOA scenario by walking throug
 
 SSH into the camera:
 ```bash
-ssh admin@192.168.1.238
+ssh admin@$CAM
 # Password: admin (see .env.devices)
 ```
 
@@ -259,8 +262,8 @@ tail -f /var/log/messages | grep antitailgate
 
 ### Check Application Status via VAPIX
 ```bash
-curl -s --digest -u 'admin:admin' \
-  "http://192.168.1.238/axis-cgi/applications/list.cgi" \
+curl -s --anyauth -u "$U:$P" \
+  "https://$CAM/axis-cgi/applications/list.cgi" \
   | grep -A5 antitailgate
 ```
 
@@ -272,7 +275,7 @@ curl -s http://localhost:8080/test
 
 ### Reset to Defaults
 ```bash
-curl -s -X POST "http://192.168.1.238:8080/reset-defaults"
+curl -s -X POST "https://$CAM/local/antitailgate/reset-defaults"
 ```
 
 Or use the Settings tab in the web UI.
@@ -303,8 +306,8 @@ C source changes require a full rebuild and reinstall:
 
 Web UI changes (HTML/CSS/JS only) can be hot-patched via SCP:
 ```bash
-scp app/html/index.html root@192.168.1.238:/usr/local/packages/antitailgate/html/
-scp app/html/app.js root@192.168.1.238:/usr/local/packages/antitailgate/html/
-scp app/html/style.css root@192.168.1.238:/usr/local/packages/antitailgate/html/
+scp app/html/index.html root@$CAM:/usr/local/packages/antitailgate/html/
+scp app/html/app.js root@$CAM:/usr/local/packages/antitailgate/html/
+scp app/html/style.css root@$CAM:/usr/local/packages/antitailgate/html/
 # No app restart needed — Apache serves static files directly
 ```

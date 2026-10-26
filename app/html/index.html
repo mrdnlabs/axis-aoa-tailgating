@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Strict CSP: no inline scripts (all handlers are wired in app.js via
+       addEventListener), scripts only from this origin, no framing. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" />
   <title>Anti-Tailgating</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -24,23 +28,21 @@
   <!-- ========== DASHBOARD ========== -->
   <div id="tab-dashboard" class="tab-panel active">
 
-    <!-- Token gauge -->
     <div class="card">
       <div class="card-title">Access Tokens</div>
       <div class="gauge-row">
         <div id="token-count" class="gauge-number">0</div>
         <div>
           <div class="gauge-label">Active tokens queued</div>
-          <div class="gauge-sublabel">Tokens expire after <span id="ttl-label">7</span>s of inactivity</div>
+          <div class="gauge-sublabel">Tokens expire <span id="ttl-label">7</span>s after a badge read</div>
         </div>
       </div>
       <div class="status-row">
         <div id="status-dot" class="dot idle"></div>
-        <span id="status-text">Idle — no recent events</span>
+        <span id="status-text">Idle — no pending tokens</span>
       </div>
     </div>
 
-    <!-- Stats -->
     <div class="card">
       <div class="card-title">Session Statistics</div>
       <div class="stat-grid">
@@ -59,26 +61,18 @@
       </div>
     </div>
 
-    <!-- Action buttons -->
     <div class="btn-row">
-      <button class="primary" onclick="badgeRead()">Simulate Badge Read</button>
-      <button onclick="thresholdCrossing()">Simulate Line Crossing</button>
-      <button class="danger" onclick="clearHistory()">Clear History</button>
+      <button class="primary" data-action="badge-read">Simulate Badge Read</button>
+      <button data-action="threshold-crossing">Simulate Line Crossing</button>
+      <button class="danger" data-action="clear-history">Clear History &amp; Tokens</button>
     </div>
 
-    <!-- Event history -->
     <div class="card">
       <div class="card-title">Event History</div>
       <div class="table-wrap">
         <table>
           <thead>
-            <tr>
-              <th>Time</th>
-              <th>Type</th>
-              <th>Source</th>
-              <th>Badge ID</th>
-              <th>Outcome</th>
-            </tr>
+            <tr><th>Time</th><th>Type</th><th>Source</th><th>Badge ID</th><th>Outcome</th></tr>
           </thead>
           <tbody id="event-table-body">
             <tr><td colspan="5" class="empty-row">No events yet</td></tr>
@@ -87,17 +81,11 @@
       </div>
     </div>
 
-    <!-- Alarm history -->
     <div class="card">
       <div class="card-title">Alarm History</div>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Notification</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Time</th><th>Notification</th></tr></thead>
           <tbody id="alarm-table-body">
             <tr><td colspan="2" class="empty-row">No alarms</td></tr>
           </tbody>
@@ -113,12 +101,13 @@
     <div class="card">
       <div class="card-title">Badge Read Endpoint</div>
       <div class="form-field">
-        <label>HTTP POST to this URL to register a badge read</label>
+        <label>Your VMS / access-control system POSTs a badge read here</label>
         <div class="url-row">
           <input type="text" id="badge-read-url" readonly />
-          <button id="copy-url-btn" onclick="copyBadgeUrl()" title="Copy to clipboard">Copy</button>
+          <button id="copy-url-btn" data-action="copy-url" title="Copy to clipboard">Copy</button>
         </div>
-        <span class="hint">Body (optional): <code>{"door":"Door Name","card":"CardID"}</code> — both fields appear in the event history</span>
+        <span class="hint">Send <code>POST</code> with <code>Content-Type: application/json</code> and body
+          <code>{"door":"Door Name","card":"CardID"}</code> (both optional). An empty POST also mints a token.</span>
       </div>
     </div>
 
@@ -128,26 +117,22 @@
         <div class="form-field">
           <label for="cfg-ttl">Token Expiration (seconds)</label>
           <input type="number" id="cfg-ttl" min="1" max="3600" value="7" />
-          <span class="hint">How long an access token remains valid after a badge read</span>
+          <span class="hint">How long an access token stays valid after a badge read</span>
         </div>
         <div class="form-field">
-          <label for="cfg-aoa-id">AOA Scenario ID</label>
-          <select id="cfg-aoa-id">
-            <option value="">Loading scenarios…</option>
-          </select>
-          <span class="hint" id="cfg-aoa-hint">Detecting human crossline scenarios from AXIS Object Analytics…</span>
+          <label for="cfg-aoa-id">AOA Scenario</label>
+          <select id="cfg-aoa-id"><option value="">Loading scenarios…</option></select>
+          <span class="hint" id="cfg-aoa-hint">Detecting human line-crossing scenarios…</span>
         </div>
         <div class="form-field">
           <label for="cfg-io-port">I/O Input Trigger Port</label>
-          <select id="cfg-io-port">
-            <option value="none">None (disabled)</option>
-          </select>
-          <span class="hint" id="cfg-io-hint">Select a digital input port to use as an access-granted trigger (e.g. wired to a door controller relay)</span>
+          <select id="cfg-io-port"><option value="none">None (disabled)</option></select>
+          <span class="hint" id="cfg-io-hint">A digital input wired to a door-controller access-granted relay can mint tokens</span>
         </div>
         <div class="form-field">
           <label for="cfg-alarm-clear-seconds">Alarm Clear Delay (seconds)</label>
           <input type="number" id="cfg-alarm-clear-seconds" min="1" max="60" value="2" />
-          <span class="hint">How long the Axis TailgatingAlarm event remains active before auto-clear</span>
+          <span class="hint">How long the Axis TailgatingAlarm event stays active before auto-clear</span>
         </div>
       </div>
     </div>
@@ -158,49 +143,72 @@
 
         <div class="form-field" style="grid-column: 1 / -1">
           <label for="cfg-alarm-type">Action Type</label>
-          <select id="cfg-alarm-type" onchange="onActionTypeChange()">
+          <select id="cfg-alarm-type" data-action="alarm-type-change">
             <option value="none">None (event only)</option>
             <option value="virtual_input">Virtual Input (remote Axis device)</option>
             <option value="a9210_output">A9210 Output (remote I/O relay)</option>
             <option value="custom_http">Custom HTTP/S Webhook</option>
           </select>
-          <span class="hint">Action to perform when tailgating is detected (in addition to the Axis event). For local outputs, use the camera's Action Rules with the TailgatingAlarm event.</span>
+          <span class="hint">Performed in addition to the Axis TailgatingAlarm event. For local
+            recording/outputs, prefer an Action Rule on that event.</span>
         </div>
 
-        <!-- Remote device fields (virtual_input, a9210_output) -->
+        <!-- Remote device (virtual_input, a9210_output) -->
         <div id="alarm-remote-fields" class="form-field" style="display:none; grid-column: 1 / -1">
           <div class="form-grid">
             <div class="form-field">
-              <label for="cfg-alarm-host">Remote Device IP</label>
+              <label for="cfg-alarm-host">Remote Device IP / host</label>
               <input type="text" id="cfg-alarm-host" placeholder="192.168.1.100" />
             </div>
             <div class="form-field">
               <label for="cfg-alarm-user">Username</label>
-              <input type="text" id="cfg-alarm-user" placeholder="root" />
+              <input type="text" id="cfg-alarm-user" placeholder="root" autocomplete="off" />
             </div>
             <div class="form-field">
               <label for="cfg-alarm-pass">Password</label>
-              <input type="password" id="cfg-alarm-pass" placeholder="password" />
+              <input type="password" id="cfg-alarm-pass" autocomplete="new-password" />
               <span class="hint" id="cfg-alarm-pass-status">Leave blank to keep the saved password.</span>
             </div>
           </div>
         </div>
 
-        <!-- Port + Duration (virtual_input, a9210_output, local_output) -->
+        <!-- Port + Duration -->
         <div id="alarm-port-fields" class="form-field" style="display:none; grid-column: 1 / -1">
           <div class="form-grid">
             <div class="form-field">
               <label for="cfg-alarm-port" id="alarm-port-label">Port</label>
-              <input type="number" id="cfg-alarm-port" min="1" max="64" value="1" />
+              <input type="number" id="cfg-alarm-port" min="1" max="65535" value="1" />
             </div>
             <div class="form-field">
-              <label for="cfg-alarm-duration" id="alarm-duration-label">Duration (seconds)</label>
-              <input type="number" id="cfg-alarm-duration" min="1" max="60000" value="5" />
+              <label for="cfg-alarm-duration">Pulse Duration (seconds)</label>
+              <input type="number" id="cfg-alarm-duration" min="1" max="3600" value="5" />
             </div>
           </div>
         </div>
 
-        <!-- Custom HTTP fields -->
+        <!-- TLS posture for remote/webhook -->
+        <div id="alarm-tls-fields" class="form-field" style="display:none; grid-column: 1 / -1">
+          <div class="form-grid">
+            <div class="form-field">
+              <label for="cfg-alarm-tls">TLS Verification</label>
+              <select id="cfg-alarm-tls" data-action="alarm-tls-change">
+                <option value="verify">Verify against system CA (public cert)</option>
+                <option value="pin">Pin certificate (self-signed Axis peer)</option>
+                <option value="noverify">No verification (self-signed, less safe)</option>
+                <option value="http">Plain HTTP — no encryption</option>
+              </select>
+              <span class="hint">Axis peripherals use self-signed certs on a bare IP. Prefer
+                <b>Pin</b>: paste the peer's key hash below.</span>
+            </div>
+            <div class="form-field" id="alarm-pin-wrap" style="display:none">
+              <label for="cfg-alarm-pin">Pinned key (<code>sha256//…</code>)</label>
+              <input type="text" id="cfg-alarm-pin" placeholder="sha256//BASE64…" />
+              <span class="hint" id="cfg-alarm-pin-status"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom HTTP -->
         <div id="alarm-http-fields" class="form-field" style="display:none; grid-column: 1 / -1">
           <div class="form-grid">
             <div class="form-field" style="grid-column: 1 / -1">
@@ -217,7 +225,9 @@
             </div>
             <div class="form-field">
               <label for="cfg-alarm-header">Custom Header</label>
-              <input type="text" id="cfg-alarm-header" placeholder="Authorization: Bearer token123" />
+              <input type="password" id="cfg-alarm-header" autocomplete="new-password"
+                     placeholder="Authorization: Bearer …" />
+              <span class="hint" id="cfg-alarm-header-status">Leave blank to keep the saved header.</span>
             </div>
             <div class="form-field" style="grid-column: 1 / -1">
               <label for="cfg-alarm-payload">Payload (POST/PUT body)</label>
@@ -225,29 +235,28 @@
             </div>
             <div class="form-field">
               <label for="cfg-alarm-http-user">Username (optional)</label>
-              <input type="text" id="cfg-alarm-http-user" placeholder="username" />
+              <input type="text" id="cfg-alarm-http-user" autocomplete="off" />
             </div>
             <div class="form-field">
               <label for="cfg-alarm-http-pass">Password (optional)</label>
-              <input type="password" id="cfg-alarm-http-pass" placeholder="password" />
+              <input type="password" id="cfg-alarm-http-pass" autocomplete="new-password" />
               <span class="hint" id="cfg-alarm-http-pass-status">Leave blank to keep the saved password.</span>
             </div>
           </div>
         </div>
 
-        <!-- Test button -->
         <div id="alarm-test-row" class="form-field" style="display:none; grid-column: 1 / -1">
-          <button class="primary" onclick="testAlarmAction()">Test Alarm Action</button>
-          <button type="button" onclick="clearSavedAlarmPassword()">Clear Saved Password</button>
-          <span class="hint">Sends one test action immediately (bypasses cooldown)</span>
+          <button class="primary" data-action="test-alarm">Test Alarm Action</button>
+          <button type="button" data-action="clear-pass">Clear Saved Password</button>
+          <span class="hint">Saves current settings first, then sends one action (no TailgatingAlarm event is published).</span>
         </div>
 
       </div>
     </div>
 
     <div class="btn-row">
-      <button class="primary" onclick="saveConfig()">Save Settings</button>
-      <button class="danger" onclick="resetDefaults()">Reset to Defaults</button>
+      <button class="primary" data-action="save-config">Save Settings</button>
+      <button class="danger" data-action="reset-defaults">Reset to Defaults</button>
     </div>
 
   </div><!-- /settings -->

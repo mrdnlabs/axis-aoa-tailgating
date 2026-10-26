@@ -1,6 +1,9 @@
 PROG    = antitailgate
 SRCS    = main.c \
           config.c \
+          settings.c \
+          json_util.c \
+          validate.c \
           token_manager.c \
           event_subscriber.c \
           event_publisher.c \

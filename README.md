@@ -27,9 +27,17 @@ For ARTPEC-7 cameras:
 
 ### 2. Enable Unsigned Applications
 
-On the camera web UI: **Settings → Apps → Allow unsigned applications**
+Either via the camera web UI (**Settings → Apps → Allow unsigned applications**)
+or over VAPIX:
 
-This cannot be set via VAPIX — it must be done through the browser UI.
+```bash
+curl -k --anyauth -u "$CAMERA_USER:$CAMERA_PASS" -X POST \
+  "https://$CAMERA_IP/axis-cgi/applications/config.cgi?action=set&name=AllowUnsigned&value=true"
+```
+
+> A factory reset turns this back off (the default is `false` from AXIS OS
+> 12.0), after which `upload.cgi` answers a bare `Error:2`. Axis plans to
+> remove the toggle around AXIS OS 13 — the durable path is a signed `.eap`.
 
 ### 3. Install
 
@@ -85,7 +93,7 @@ Stored via the AXParameter API; persist across restarts and firmware upgrades.
 |-----------|---------|-------------|
 | `TokenExpirationSeconds` | `7` | Token TTL in seconds |
 | `AoaScenarioId` | `1` | AOA line crossing scenario ID |
-| `InputTriggerPort` | `none` | Digital input port to treat as badge-read (or `none`) |
+| `InputTriggerPort` | `none` | Digital input port that mints a token (device-native **0-based** index: `0` = "Port 1"), or `none` |
 | `AlarmClearSeconds` | `2` | Seconds before the stateful TailgatingAlarm event auto-clears |
 
 ### Alarm Action (outbound HTTP/VAPIX on alarm)
@@ -93,58 +101,76 @@ Stored via the AXParameter API; persist across restarts and firmware upgrades.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `AlarmActionType` | `none` | `none`, `virtual_input`, `a9210_output`, or `custom_http` |
+| `AlarmActionTlsMode` | `verify` | Outbound TLS: `verify` (system CA), `pin` (pinned key), `noverify` (self-signed), `http` (cleartext) |
+| `AlarmActionPin` | `""` | `sha256//…` pinned public key, used when `TlsMode=pin` |
 | `AlarmActionHost` | `""` | Target host for `virtual_input` / `a9210_output` (Axis device IP) |
-| `AlarmActionPort` | `"1"` | Virtual input / output port number |
-| `AlarmActionDuration` | `"5"` | Pulse duration in seconds (`virtual_input` / `a9210_output`) |
-| `AlarmActionUser` | `""` | Username for digest auth on the action endpoint |
-| `AlarmActionPass` | `""` | **Credential. See Security below.** |
-| `AlarmActionUrl` | `""` | Target URL for `custom_http` action |
+| `AlarmActionPort` | `"1"` | Virtual input / output port number (1–65535) |
+| `AlarmActionDuration` | `"5"` | Pulse duration in **seconds** (1–3600); the device times the pulse itself |
+| `AlarmActionUser` | `""` | Username for auth on the action endpoint |
+| `AlarmActionPass` | `""` | **Credential (masked).** See Security below. |
+| `AlarmActionUrl` | `""` | Target URL for `custom_http` (`http`/`https`, no embedded credentials) |
 | `AlarmActionMethod` | `GET` | HTTP method for `custom_http` (GET/POST/PUT) |
 | `AlarmActionPayload` | `""` | Request body for `custom_http` |
-| `AlarmActionHeader` | `""` | Extra request header for `custom_http` (`Name: value`) |
+| `AlarmActionHeader` | `""` | **Secret (masked).** Extra request header for `custom_http` (`Name: value`) |
 
 ## Security
 
 ### Transport and access control
 
-- The web UI and API are reached through Axis's reverse proxy, which enforces digest authentication and TLS. The internal CivetWeb listener binds to `127.0.0.1:8080` only.
-- Two proxy roles are exposed: `/local/antitailgate/admin/*` (admin) and `/local/antitailgate/ingest/*` (operator).
-- Input validation: `AlarmActionHost` must be a hostname or IP (no schemes, no spaces); `AlarmActionPort` and `AlarmActionDuration` must be numeric and in range. JSON bodies are validated against a flat-object schema with per-field length limits.
+- The API is reached only through Axis's reverse proxy (device authentication + TLS). The internal CivetWeb listener binds `127.0.0.1:8080`; there is no direct network access, and handlers are registered only at the proxy-prefixed paths.
+- Two proxy roles: `/local/antitailgate/admin/*` (admin) and `/local/antitailgate/ingest/*` (operator).
+- **Path canonicalization:** requests whose decoded path differs from their cleaned path (encoded `..`, backslashes) are rejected with `400`, so an operator cannot reach an admin handler via separator tricks.
+- **CSRF / method contract:** mutating endpoints require `POST`; admin mutations additionally require `Content-Type: application/json` and `X-Requested-With: antitailgate`. A simple cross-origin form can set neither.
+- **Input validation:** every field is validated (host/URL/header/scenario/port/pin shape, control-char rejection, UTF-8, integer ranges) *before* anything is persisted — a config POST is all-or-nothing.
 
-### Alarm-action credential handling
+### Outbound alarm actions
 
-- `AlarmActionPass` is declared with the AXParameter `password:maxlen=127` type. The runtime masks the value in:
-  - `param.cgi?action=list` (returns `******` instead of the value)
-  - The AXIS OS 12.7+ audit log
-  - The settings UI (rendered as a password field)
-- The ACAP itself reads the value via `ax_parameter_get` and uses it as the HTTP digest credential for the configured `AlarmActionHost`.
-- `/admin/config` (GET) **does not** echo `AlarmActionPass`. It returns `AlarmActionPassConfigured` (boolean). Set the password by POSTing `{"AlarmActionPass": "..."}` and clear it with `{"AlarmActionClearPass": true}`.
+- `AlarmActionTlsMode` controls the outbound TLS posture: `verify` (public CA), `pin` (pin the peer's key via `AlarmActionPin`, the right choice for a self-signed Axis peripheral on a bare IP), `noverify`, or `http` (cleartext, last resort). Redirects are never followed on a credentialed request, so auth/body cannot be re-targeted to another host. The scheme is restricted to `http`/`https`.
+- `a9210_output` uses the device-side timed-pulse form in a single request, so the relay drops even if this app crashes or is restarted mid-pulse.
+
+### Credential handling
+
+- `AlarmActionPass` and `AlarmActionHeader` use the AXParameter `password` type: masked in `param.cgi?action=list` (returns `******`), in the AXIS OS 12.7+ audit log, and in the settings UI. The ACAP reads them via `ax_parameter_get` for the outbound request.
+- `/admin/config` (GET) never echoes a secret's value — only `…Configured` booleans. Both secrets are **keep-if-blank** on save; clear with `{"AlarmActionClearPass": true}` / `{"AlarmActionClearHeader": true}`.
 
 ### Residual risk
 
-- AXParameter stores `password`-typed values unencrypted on the device's flash. A root-level compromise of the device — or physical extraction of the flash — still exposes the value. There is no Axis-provided keystore for ACAPs ([standards §4.3](https://github.com/) acknowledges this).
-- Upgrading an existing device from a build that stored `AlarmActionPass` as a plain `String` will mask the value in `param.cgi` going forward, but the on-flash residue from the old build remains until the next write. **Rotate any password that was previously exposed via `param.cgi`** after upgrading.
+- AXParameter stores `password`-typed values unencrypted on the device's flash. A root compromise or physical flash extraction still exposes them; there is no Axis keystore for ACAPs.
+- Upgrading from an older build that stored a secret as a plain `String` masks it from `param.cgi` going forward, but the on-flash residue remains until the next write. **Rotate any credential previously exposed via `param.cgi`.**
 
 ## Project Structure
 
 ```
 app/
 ├── manifest.json          # ACAP manifest (schemaVersion 1.9.0)
-├── main.c                 # Entry point, GMainLoop, signal handling
-├── config.c / config.h    # AXParameter wrappers
-├── token_manager.c / .h   # Token queue, GMutex, expiry timer, event history
-├── event_subscriber.c/.h  # AXEvent subscription to AOA line crossing events
-├── event_publisher.c/.h   # AXEvent declaration and sending of TailgatingAlarm
-├── alarm_handler.c / .h   # Thin wrapper: logs alarm, calls event_publisher
-├── web_server.c / .h      # CivetWeb embedded HTTP server on port 8080
-├── civetweb.c / .h        # Bundled CivetWeb v1.16 (MIT license)
+├── main.c                 # Entry point, GMainLoop, signal handling, shutdown watchdog
+├── config.c / config.h    # AXParameter get/set + fallback file (raw layer)
+├── settings.c / settings.h# Validated in-memory config snapshot + change callbacks
+├── json_util.c / .h       # Strict flat-object JSON parser (UTF-8, no dup keys)
+├── validate.c / validate.h# Field validators (host/url/header/scenario/pin/numeric)
+├── token_manager.c / .h   # Token queue, GMutex, expiry timer, history, session stats
+├── event_subscriber.c/.h  # AXEvent subscription to AOA line-crossing (idempotent)
+├── event_publisher.c/.h   # AXEvent declaration + stateful TailgatingAlarm
+├── alarm_handler.c / .h    # Outbound action dispatch (libcurl, TLS modes, worker pool)
+├── web_server.c / .h      # CivetWeb server on 127.0.0.1:8080 (proxy-only handlers)
+├── civetweb.c / .h        # Vendored CivetWeb v1.16, sha256-pinned by build.sh (MIT)
+├── test/                  # Host-side unit tests (json_util, validate) — run_tests.sh
 └── html/
-    ├── index.html         # Dashboard + Settings SPA
-    ├── app.js             # Polling and DOM updates
+    ├── index.html         # Dashboard + Settings SPA (strict CSP, no inline JS)
+    ├── app.js             # Polling, DOM updates, settings
     └── style.css          # Responsive styling
 Dockerfile                 # Multi-arch ACAP build (axisecp/acap-native-sdk:12.9.0)
-build.sh                   # Build helper script
+build.sh                   # Build helper (--no-cache; verifies CivetWeb sha256)
 docs/                      # Documentation
+```
+
+## Tests
+
+Pure modules (JSON parser, validators) have host-side unit tests that need no
+device or SDK:
+
+```bash
+app/test/run_tests.sh      # compiles + runs in an Alpine container
 ```
 
 ## Documentation

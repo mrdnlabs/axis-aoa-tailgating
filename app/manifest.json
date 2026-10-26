@@ -54,9 +54,14 @@
           "type": "String"
         },
         {
-          "name": "AlarmActionInsecure",
-          "default": "false",
-          "type": "bool:false,true"
+          "name": "AlarmActionTlsMode",
+          "default": "verify",
+          "type": "String"
+        },
+        {
+          "name": "AlarmActionPin",
+          "default": "",
+          "type": "String"
         },
         {
           "name": "AlarmActionHost",
@@ -101,7 +106,7 @@
         {
           "name": "AlarmActionHeader",
           "default": "",
-          "type": "String"
+          "type": "password:maxlen=255"
         }
       ]
     }

@@ -29,6 +29,13 @@ bool config_set(const char *name, const char *value);
 
 
 /**
+ * Borrow the underlying AXParameter handle (for registering change
+ * callbacks).  NULL when the file fallback is in use.  Ownership stays
+ * with the config module; do not free.
+ */
+struct _AXParameter *config_ax_parameter(void);
+
+/**
  * Clean up the configuration subsystem.
  */
 void config_cleanup(void);
